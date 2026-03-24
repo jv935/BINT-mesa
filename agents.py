@@ -2,11 +2,13 @@ import mesa
 from mesa.discrete_space import CellAgent, FixedAgent
 
 class DeliveryAgent(CellAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell):
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int):
         super().__init__(model)
         self.cell = cell
         self.goal = None
         self.prev_goal = None
+        self.vision_radius = vision_radius
+        self.internal_map = {}
         self.points = 0
 
     def move(self, target):
@@ -35,12 +37,28 @@ class DeliveryAgent(CellAgent):
             self.points += 1
             self.goal = None
 
+    def perceive_env(self):
+        visible_area = self.model.grid.get_neighborhood(
+            include_center=True,
+            radius=self.vision_radius,
+        )
+
+        for coord in visible_area:
+            for agent in coord.agents:
+                if isinstance(agent, DropOffLocationAgent):
+                    self.internal_map[coord] = "drop_off"
+                else:
+                    self.internal_map[coord] = "floor"
+
     def step(self):
         if self.goal is None:
-            while True:
-                self.goal = self.random.choice(self.model.agents.select(agent_type=DropOffLocationAgent))
-                if self.goal is not self.prev_goal:
-                    break
+            all_dropoffs = self.model.agents.select(agent_type=DropOffLocationAgent)
+            valid_dropoffs = [d for d in all_dropoffs if d is not self.prev_goal]
+
+            if valid_dropoffs:
+                self.goal = self.random.choice(valid_dropoffs)
+            else:
+                self.goal = self.prev_goal
 
         self.move(self.goal)
 
