@@ -38,19 +38,27 @@ class DeliveryAgent(CellAgent):
             self.goal = None
 
     def perceive_env(self):
-        visible_area = self.model.grid.get_neighborhood(
+        visible_area = self.cell.get_neighborhood(
             include_center=True,
             radius=self.vision_radius,
-        )
+        ).cells
 
-        for coord in visible_area:
-            for agent in coord.agents:
+        for cell in visible_area:
+            if cell.is_empty:
+                self.internal_map[cell.coordinate] = "floor"
+
+            for agent in cell.agents:
                 if isinstance(agent, DropOffLocationAgent):
-                    self.internal_map[coord] = "drop_off"
+                    self.internal_map[cell.coordinate] = "drop_off"
                 else:
-                    self.internal_map[coord] = "floor"
+                    self.internal_map[cell.coordinate] = "floor"
 
     def step(self):
+        print(f"Step {self.model.time}")
+        self.perceive_env()
+        print(self.internal_map)
+        print(len(self.internal_map))
+
         if self.goal is None:
             all_dropoffs = self.model.agents.select(agent_type=DropOffLocationAgent)
             valid_dropoffs = [d for d in all_dropoffs if d is not self.prev_goal]
