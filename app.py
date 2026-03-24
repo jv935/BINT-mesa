@@ -4,6 +4,9 @@ from mesa.visualization import SolaraViz, SpaceRenderer
 from mesa.visualization.components import AgentPortrayalStyle, PropertyLayerStyle
 from agents import DeliveryAgent, DropOffLocationAgent
 from model import BintWorldModel
+import solara
+from matplotlib.figure import Figure
+from mesa.visualization.utils import update_counter
 
 
 model_params = {
@@ -58,17 +61,13 @@ def property_layer_portrayal(layer: mesa.discrete_space.PropertyLayer):
     return None
 
 
-bint = BintWorldModel()
+bint = BintWorldModel(rng=13)
 
 renderer = SpaceRenderer(model=bint, backend="matplotlib")
 renderer.draw_structure(lw=2, ls="solid", color="black", alpha=0.5)
 renderer.setup_agents(agent_portrayal).draw_agents()
 #renderer.setup_propertylayer(property_layer_portrayal).draw_propertylayer()
 
-
-import solara
-from matplotlib.figure import Figure
-from mesa.visualization.utils import update_counter
 
 @solara.component
 def ScoreBar(model: mesa.Model):
