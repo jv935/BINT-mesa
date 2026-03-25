@@ -14,8 +14,8 @@ model_params = {
         "type": "SliderInt",
         "value": 5,
         "label": "Number of agents",
-        "min": 2,
-        "max": 50,
+        "min": 1,
+        "max": 20,
         "step": 1,
     },
     "num_drop_offs": {
