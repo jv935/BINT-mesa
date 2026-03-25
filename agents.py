@@ -5,16 +5,21 @@ class DeliveryAgent(CellAgent):
     def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int):
         super().__init__(model)
         self.cell = cell
-        self.goal = None
-        self.prev_goal = None
-        self.vision_radius = vision_radius
+
         self.internal_map = {}
+        self.known_drop_offs = {}
+
+        self.goal_name = None
+        self.prev_goal_name = None
+        self.state = None
+        self.target_coordinate = None
+
+        self.vision_radius = vision_radius
         self.points = 0
 
-    def move(self, target):
-        # self.cell = self.cell.neighborhood.select_random_cell()
+    def move(self):
         current_x, current_y = self.cell.coordinate
-        target_x, target_y = target.cell.coordinate
+        target_x, target_y = self.target_coordinate
 
         dx = 0
         if current_x < target_x:
@@ -33,9 +38,14 @@ class DeliveryAgent(CellAgent):
         if dx != 0 or dy != 0:
             self.move_relative((dx, dy))
 
-        if self.cell.coordinate == target.cell.coordinate:
-            self.points += 1
-            self.goal = None
+        if self.cell.coordinate == self.target_coordinate:
+            if self.state == "MOVING TO TARGET":
+                self.points += 1
+                self.prev_goal_name = self.goal_name
+                self.goal_name = None
+
+            self.state = None
+            self.target_coordinate = None
 
     def perceive_env(self):
         visible_area = self.cell.get_neighborhood(
@@ -50,25 +60,41 @@ class DeliveryAgent(CellAgent):
             for agent in cell.agents:
                 if isinstance(agent, DropOffLocationAgent):
                     self.internal_map[cell.coordinate] = "drop_off"
+                    self.known_drop_offs[agent.unique_id] = cell.coordinate
+                    break
                 else:
                     self.internal_map[cell.coordinate] = "floor"
 
+    def receive_package(self, new_goal):
+        self.goal_name = new_goal
+
+    def select_unexplored_coordinate(self):
+        all_possible_coordinates = set((x,y) for x in range(self.model.grid.width) for y in range(self.model.grid.height))
+        explored_coordinates = set(self.internal_map.keys())
+
+        unexplored_coordinates = all_possible_coordinates - explored_coordinates
+
+        if unexplored_coordinates:
+            return self.random.choice(list(unexplored_coordinates))
+        else:
+            return None
+
     def step(self):
-        print(f"Step {self.model.time}")
         self.perceive_env()
-        print(self.internal_map)
-        print(len(self.internal_map))
 
-        if self.goal is None:
-            all_dropoffs = self.model.agents.select(agent_type=DropOffLocationAgent)
-            valid_dropoffs = [d for d in all_dropoffs if d is not self.prev_goal]
+        if self.goal_name is None:
+            return
 
-            if valid_dropoffs:
-                self.goal = self.random.choice(valid_dropoffs)
-            else:
-                self.goal = self.prev_goal
+        if self.goal_name in self.known_drop_offs and self.state != "MOVING TO TARGET":
+            self.target_coordinate = self.known_drop_offs[self.goal_name]
+            self.state = "MOVING TO TARGET"
 
-        self.move(self.goal)
+        elif (self.state == "EXPLORING" and self.target_coordinate in self.internal_map) or self.state is None:
+            self.target_coordinate = self.select_unexplored_coordinate()
+            self.state = "EXPLORING"
+
+        if self.target_coordinate:
+            self.move()
 
 
 
