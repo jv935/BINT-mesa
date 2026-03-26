@@ -4,7 +4,7 @@ from agents import DeliveryAgent, DropOffLocationAgent
 
 
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_agents: int=5, width: int=25, height: int=25, num_drop_offs: int=5, agent_vision_radius: int=2, rng=None):
+    def __init__(self, num_agents: int=5, width: int=25, height: int=25, num_drop_offs: int=5, agent_vision_radius: int=2, rng: int=None) -> None:
         super().__init__(rng=rng)
         self.num_agents = num_agents
         self.num_drop_offs = num_drop_offs
@@ -23,7 +23,7 @@ class BintWorldModel(mesa.Model):
         #self.datacollector = DataCollector()
 
 
-    def distribute_initial_knowledge(self):
+    def distribute_initial_knowledge(self) -> None:
         drop_offs = self.agents.select(agent_type=DropOffLocationAgent).to_list()
         delivery_agents = self.agents.select(agent_type=DeliveryAgent).to_list()
 
@@ -39,7 +39,7 @@ class BintWorldModel(mesa.Model):
                 drop_off_name=drop_off.unique_id
             )
 
-    def dispatch_packages(self):
+    def dispatch_packages(self) -> None:
         # get the names of each drop off location
         all_drop_offs = [d.unique_id for d in self.agents.select(agent_type=DropOffLocationAgent)]
 
@@ -52,6 +52,6 @@ class BintWorldModel(mesa.Model):
                     new_destination = self.random.choice(possible_destinations)
                     agent.receive_package(new_destination)
 
-    def step(self):
+    def step(self) -> None:
         self.agents.shuffle_do("step")
         self.dispatch_packages()

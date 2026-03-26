@@ -2,7 +2,7 @@ import mesa
 from mesa.discrete_space import CellAgent, FixedAgent
 
 class DeliveryAgent(CellAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int):
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int) -> None:
         super().__init__(model)
         self.cell = cell
         self.internal_map = {}
@@ -15,7 +15,7 @@ class DeliveryAgent(CellAgent):
         self.points = 0
 
 
-    def move(self):
+    def move(self) -> None:
         current_x, current_y = self.cell.coordinate
         target_x, target_y = self.target_coordinate
 
@@ -74,7 +74,7 @@ class DeliveryAgent(CellAgent):
             self.known_drop_offs[drop_off_name] = coordinate
 
 
-    def perceive_env(self):
+    def perceive_env(self) -> None:
         visible_area = self.cell.get_neighborhood(
             include_center=True,
             radius=self.vision_radius,
@@ -92,11 +92,11 @@ class DeliveryAgent(CellAgent):
                     self.update_internal_map(cell.coordinate, "floor")
 
 
-    def receive_package(self, new_goal):
+    def receive_package(self, new_goal: str) -> None:
         self.goal_name = new_goal
 
 
-    def select_unexplored_coordinate(self):
+    def select_unexplored_coordinate(self) -> None|tuple[int, int]:
         all_possible_coordinates = set((x,y) for x in range(self.model.grid.width) for y in range(self.model.grid.height))
         explored_coordinates = set(self.internal_map.keys())
 
@@ -108,7 +108,7 @@ class DeliveryAgent(CellAgent):
             return None
 
 
-    def step(self):
+    def step(self) -> None:
         print(f"Initial knowledge: {self.known_drop_offs}\n{self.internal_map}")
         self.perceive_env()
 
@@ -129,6 +129,6 @@ class DeliveryAgent(CellAgent):
 
 
 class DropOffLocationAgent(FixedAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell):
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell) -> None:
         super().__init__(model)
         self.cell = cell
