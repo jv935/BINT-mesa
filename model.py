@@ -22,10 +22,12 @@ class BintWorldModel(mesa.Model):
         #self.datacollector = DataCollector()
 
     def dispatch_packages(self):
+        # get the names of each drop off location
         all_drop_offs = [d.unique_id for d in self.agents.select(agent_type=DropOffLocationAgent)]
 
         for agent in self.agents.select(agent_type=DeliveryAgent):
             if agent.goal_name is None:
+                # do not use previous drop off again
                 possible_destinations = [d for d in all_drop_offs if d != agent.prev_goal_name]
 
                 if possible_destinations:

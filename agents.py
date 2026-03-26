@@ -5,15 +5,12 @@ class DeliveryAgent(CellAgent):
     def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int):
         super().__init__(model)
         self.cell = cell
-
         self.internal_map = {}
         self.known_drop_offs = {}
-
         self.goal_name = None
         self.prev_goal_name = None
         self.state = None
         self.target_coordinate = None
-
         self.vision_radius = vision_radius
         self.points = 0
 
@@ -33,13 +30,13 @@ class DeliveryAgent(CellAgent):
         elif current_y > target_y:
             dy = -1
 
-        #print(f"Current location: {self.cell.coordinate}, Target location: {target.cell.coordinate}, dx: {dx}, dy: {dy}")
-        #new_x, new_y = (current_x + dx, current_y + dy)
         if dx != 0 or dy != 0:
             self.move_relative((dx, dy))
 
         if self.cell.coordinate == self.target_coordinate:
-            if self.state == "MOVING TO TARGET":
+            agents_on_cell = [a.unique_id for a in self.cell.agents]
+            # if the delivery location is here
+            if self.goal_name in agents_on_cell:
                 self.points += 1
                 self.prev_goal_name = self.goal_name
                 self.goal_name = None
@@ -85,9 +82,9 @@ class DeliveryAgent(CellAgent):
         if self.goal_name is None:
             return
 
-        if self.goal_name in self.known_drop_offs and self.state != "MOVING TO TARGET":
+        if self.goal_name in self.known_drop_offs and self.state != "DELIVERING":
             self.target_coordinate = self.known_drop_offs[self.goal_name]
-            self.state = "MOVING TO TARGET"
+            self.state = "DELIVERING"
 
         elif (self.state == "EXPLORING" and self.target_coordinate in self.internal_map) or self.state is None:
             self.target_coordinate = self.select_unexplored_coordinate()
