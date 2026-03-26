@@ -17,9 +17,27 @@ class BintWorldModel(mesa.Model):
         DeliveryAgent.create_agents(self, self.num_agents, self.agent_spawn_cells, self.agent_vision_radius)
         DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
 
+        self.distribute_initial_knowledge()
         self.dispatch_packages()
 
         #self.datacollector = DataCollector()
+
+
+    def distribute_initial_knowledge(self):
+        drop_offs = self.agents.select(agent_type=DropOffLocationAgent).to_list()
+        delivery_agents = self.agents.select(agent_type=DeliveryAgent).to_list()
+
+        self.random.shuffle(delivery_agents)
+
+        for i, drop_off in enumerate(drop_offs):
+            receiving_agent = delivery_agents[i % self.num_agents]
+
+            receiving_agent.update_internal_map(
+                coordinate=drop_off.cell.coordinate,
+                env_type="drop_off",
+                info_source="self",
+                drop_off_name=drop_off.unique_id
+            )
 
     def dispatch_packages(self):
         # get the names of each drop off location

@@ -14,6 +14,7 @@ class DeliveryAgent(CellAgent):
         self.vision_radius = vision_radius
         self.points = 0
 
+
     def move(self):
         current_x, current_y = self.cell.coordinate
         target_x, target_y = self.target_coordinate
@@ -44,6 +45,35 @@ class DeliveryAgent(CellAgent):
             self.state = None
             self.target_coordinate = None
 
+
+    def update_internal_map(self, coordinate: tuple[int], env_type: str, info_source: str="self", drop_off_name: str|None=None) -> None:
+        """
+        Updates the internal map of the agent.
+
+        :param coordinate: The coordinate to store.
+        :param env_type: Can be 'floor' or 'drop_off'.
+        :param info_source: Either 'self' or the id of the agent that provided the information.
+        :param drop_off_name: The name of the drop-off location.
+        """
+
+        # If coordinate already has a record
+        if coordinate in self.internal_map:
+            existing_source = self.internal_map[coordinate]["source"]
+
+            # Do not overwrite direct map info with indirect info
+            if existing_source == "self" and info_source != "self":
+                return
+
+        self.internal_map[coordinate] = {
+            "type": env_type,
+            "source": info_source,
+        }
+
+        # If it's a drop-off add it to the drop-off index
+        if drop_off_name is not None:
+            self.known_drop_offs[drop_off_name] = coordinate
+
+
     def perceive_env(self):
         visible_area = self.cell.get_neighborhood(
             include_center=True,
@@ -52,18 +82,19 @@ class DeliveryAgent(CellAgent):
 
         for cell in visible_area:
             if cell.is_empty:
-                self.internal_map[cell.coordinate] = "floor"
+                self.update_internal_map(cell.coordinate, "floor")
 
             for agent in cell.agents:
                 if isinstance(agent, DropOffLocationAgent):
-                    self.internal_map[cell.coordinate] = "drop_off"
-                    self.known_drop_offs[agent.unique_id] = cell.coordinate
+                    self.update_internal_map(cell.coordinate, "drop_off", drop_off_name=agent.unique_id)
                     break
                 else:
-                    self.internal_map[cell.coordinate] = "floor"
+                    self.update_internal_map(cell.coordinate, "floor")
+
 
     def receive_package(self, new_goal):
         self.goal_name = new_goal
+
 
     def select_unexplored_coordinate(self):
         all_possible_coordinates = set((x,y) for x in range(self.model.grid.width) for y in range(self.model.grid.height))
@@ -76,7 +107,9 @@ class DeliveryAgent(CellAgent):
         else:
             return None
 
+
     def step(self):
+        print(f"Initial knowledge: {self.known_drop_offs}\n{self.internal_map}")
         self.perceive_env()
 
         if self.goal_name is None:
@@ -99,17 +132,3 @@ class DropOffLocationAgent(FixedAgent):
     def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell):
         super().__init__(model)
         self.cell = cell
-    #     self.storage = []
-    #     self.capacity = 3
-    #
-    # def get_packages(self):
-    #     self.storage.append(
-    #         self.random.sample(
-    #             self.model.grid.all_cells.cells,
-    #             k=self.capacity
-    #         )
-    #     )
-    #
-    # def step(self):
-    #     if len(self.storage) == 0:
-    #         self.get_packages()
