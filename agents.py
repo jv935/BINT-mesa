@@ -50,7 +50,7 @@ class DeliveryAgent(CellAgent):
         if self.cell.coordinate == self.target_coordinate:
             agents_on_cell = [a.unique_id for a in self.cell.agents]
             # if the delivery location is here
-            if self.goal_name in agents_on_cell:
+            if self.state == "DELIVERING" and self.goal_name in agents_on_cell:
                 self.points += 1
                 self.prev_goal_name = self.goal_name
                 self.goal_name = None
@@ -138,19 +138,23 @@ class DeliveryAgent(CellAgent):
 
 
     def step(self) -> None:
-        print(f"Initial knowledge: {self.known_drop_offs}\n{self.internal_map}")
         self.perceive_env()
 
         if self.goal_name is None:
             return
 
-        if self.goal_name in self.known_drop_offs and self.state != "DELIVERING":
+        if self.goal_name in self.known_drop_offs.keys() and self.state != "DELIVERING":
             self.target_coordinate = self.known_drop_offs[self.goal_name]
             self.state = "DELIVERING"
+        elif self.state is None or (self.state == "EXPLORING" and self.target_coordinate in self.internal_map):
+            success = self.model.request_map_data(self, self.goal_name)
 
-        elif (self.state == "EXPLORING" and self.target_coordinate in self.internal_map) or self.state is None:
-            self.target_coordinate = self.select_unexplored_coordinate()
-            self.state = "EXPLORING"
+            if success:
+                self.target_coordinate = self.known_drop_offs[self.goal_name]
+                self.state = "DELIVERING"
+            else:
+                self.target_coordinate = self.select_unexplored_coordinate()
+                self.state = "EXPLORING"
 
         if self.target_coordinate:
             self.move()

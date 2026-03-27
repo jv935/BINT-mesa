@@ -1,4 +1,5 @@
 import mesa
+from IPython.terminal.shortcuts.auto_suggest import accept
 from mesa.discrete_space import OrthogonalMooreGrid
 from agents import DeliveryAgent, DropOffLocationAgent
 
@@ -38,6 +39,29 @@ class BintWorldModel(mesa.Model):
 
         self.datacollector.collect(self)
 
+
+    def request_map_data(self, requester: mesa.discrete_space.CellAgent, target_name: str) -> bool:
+        responses = []
+
+        for agent in self.agents.select(agent_type=DeliveryAgent):
+            if agent == requester:
+                continue
+
+            if target_name in agent.known_drop_offs:
+                rx, ry = requester.cell.coordinate
+                ax, ay = agent.cell.coordinate
+                dist = abs(rx-ax) + abs(ry-ay)
+
+                responses.append({"agent": agent, "dist": dist, "coord": agent.known_drop_offs[target_name]})
+
+        responses.sort(key=lambda x: x["dist"])
+
+        for response in responses:
+            # Always accept for now
+            requester.update_internal_map(response["coord"], "drop_off", response["agent"], target_name)
+            return True
+
+        return False
 
     def distribute_initial_knowledge(self) -> None:
         """
