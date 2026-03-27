@@ -3,6 +3,14 @@ from mesa.discrete_space import CellAgent, FixedAgent
 
 class DeliveryAgent(CellAgent):
     def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int) -> None:
+        """
+        An agent that delivers packages to drop-off locations. Can share map data with other agents.
+
+        :param model: The mesa model.
+        :param cell: The cell on which the agent spawns.
+        :param vision_radius: The vision radius.
+        """
+
         super().__init__(model)
         self.cell = cell
         self.internal_map = {}
@@ -16,6 +24,11 @@ class DeliveryAgent(CellAgent):
 
 
     def move(self) -> None:
+        """
+        Move towards the internal target coordinate.
+        Can move 1 cell in one of 8 directions at a time.
+        """
+
         current_x, current_y = self.cell.coordinate
         target_x, target_y = self.target_coordinate
 
@@ -75,6 +88,10 @@ class DeliveryAgent(CellAgent):
 
 
     def perceive_env(self) -> None:
+        """
+        Check area visible in vision range and update internal map.
+        """
+
         visible_area = self.cell.get_neighborhood(
             include_center=True,
             radius=self.vision_radius,
@@ -93,10 +110,22 @@ class DeliveryAgent(CellAgent):
 
 
     def receive_package(self, new_goal: str) -> None:
+        """
+        Set new goal location.
+
+        :param new_goal: The new goal location.
+        """
         self.goal_name = new_goal
 
 
     def select_unexplored_coordinate(self) -> None|tuple[int, int]:
+        """
+        Randomly select an unexplored coordinate.
+        If there are no unexplored coordinates, return None.
+
+        :return: None or coordinate
+        """
+
         all_possible_coordinates = set((x,y) for x in range(self.model.grid.width) for y in range(self.model.grid.height))
         explored_coordinates = set(self.internal_map.keys())
 
@@ -130,5 +159,12 @@ class DeliveryAgent(CellAgent):
 
 class DropOffLocationAgent(FixedAgent):
     def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell) -> None:
+        """
+        A fixed agent that represents a drop-off location.
+
+        :param model: The mesa model.
+        :param cell: The cell on which the agent spawns.
+        """
+
         super().__init__(model)
         self.cell = cell
