@@ -20,7 +20,12 @@ class BintWorldModel(mesa.Model):
         self.distribute_initial_knowledge()
         self.dispatch_packages()
 
-        #self.datacollector = DataCollector()
+        self.datacollector = mesa.DataCollector(
+            model_reporters={"Number of Agents": "num_agents"},
+            agenttype_reporters={DeliveryAgent: {"Points": "points"}}
+        )
+
+        self.datacollector.collect(self)
 
 
     def distribute_initial_knowledge(self) -> None:
@@ -35,7 +40,7 @@ class BintWorldModel(mesa.Model):
             receiving_agent.update_internal_map(
                 coordinate=drop_off.cell.coordinate,
                 env_type="drop_off",
-                info_source="self",
+                info_source="system",
                 drop_off_name=drop_off.unique_id
             )
 
@@ -55,3 +60,4 @@ class BintWorldModel(mesa.Model):
     def step(self) -> None:
         self.agents.shuffle_do("step")
         self.dispatch_packages()
+        self.datacollector.collect(self)

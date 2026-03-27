@@ -1,7 +1,11 @@
 import numpy as np
+import pandas as pd
 import mesa
+from matplotlib.ticker import MaxNLocator
 from mesa.visualization import SolaraViz, SpaceRenderer
 from mesa.visualization.components import AgentPortrayalStyle, PropertyLayerStyle
+from numpy import integer
+
 from agents import DeliveryAgent, DropOffLocationAgent
 from model import BintWorldModel
 import solara
@@ -66,7 +70,6 @@ bint = BintWorldModel(rng=13)
 renderer = SpaceRenderer(model=bint, backend="matplotlib")
 renderer.draw_structure(lw=2, ls="solid", color="black", alpha=0.5)
 renderer.setup_agents(agent_portrayal).draw_agents()
-#renderer.setup_propertylayer(property_layer_portrayal).draw_propertylayer()
 
 
 @solara.component
@@ -86,10 +89,39 @@ def ScoreBar(model: mesa.Model):
     return solara.FigureMatplotlib(fig)
 
 
+@solara.component
+def PointsOverTime(model: BintWorldModel):
+    update_counter.get()
+
+    fig = Figure()
+    ax = fig.subplots()
+
+    df = model.datacollector.get_agenttype_vars_dataframe(DeliveryAgent)
+
+    if not df.empty:
+        # reshape to have steps on the x-axis, agent ids as different columns
+        points_df = df.unstack(level="AgentID")["Points"]
+
+        for agent_id in points_df.columns:
+            ax.plot(points_df.index, points_df[agent_id], label=f"Agent {agent_id}")
+
+        ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+
+    ax.set_title("Points Over Time")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Points")
+
+    # Force axes to use integers
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    return solara.FigureMatplotlib(fig)
+
+
 page = SolaraViz(
     model=bint,
     renderer=renderer,
-    components=[ScoreBar],
+    components=[PointsOverTime],
     model_params=model_params,
     name="test"
 )
