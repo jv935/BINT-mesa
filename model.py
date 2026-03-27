@@ -5,6 +5,17 @@ from agents import DeliveryAgent, DropOffLocationAgent
 
 class BintWorldModel(mesa.Model):
     def __init__(self, num_agents: int=5, width: int=25, height: int=25, num_drop_offs: int=5, agent_vision_radius: int=2, rng: int=None) -> None:
+        """
+        A model for the implementation of BINT.
+
+        :param num_agents: The number of delivery agents.
+        :param width: The width of the grid.
+        :param height: The height of the grid.
+        :param num_drop_offs: The number of drop-off locations.
+        :param agent_vision_radius: The vision radius of the delivery agents.
+        :param rng: Random generation seed.
+        """
+
         super().__init__(rng=rng)
         self.num_agents = num_agents
         self.num_drop_offs = num_drop_offs
@@ -29,6 +40,12 @@ class BintWorldModel(mesa.Model):
 
 
     def distribute_initial_knowledge(self) -> None:
+        """
+        Evenly distribute drop-off location coordinates among the delivery agents.
+        Makes sure each delivery agent knows at least one drop-off location before giving a second coordinate.
+        If there are less drop-offs than agents then some agents will not start with any initial knowledge.
+        """
+
         drop_offs = self.agents.select(agent_type=DropOffLocationAgent).to_list()
         delivery_agents = self.agents.select(agent_type=DeliveryAgent).to_list()
 
@@ -45,6 +62,11 @@ class BintWorldModel(mesa.Model):
             )
 
     def dispatch_packages(self) -> None:
+        """
+        Randomly assign new delivery goals for each agent.
+        Will not assign the same goal as lsat time.
+        """
+
         # get the names of each drop off location
         all_drop_offs = [d.unique_id for d in self.agents.select(agent_type=DropOffLocationAgent)]
 
