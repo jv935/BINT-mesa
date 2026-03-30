@@ -1,11 +1,12 @@
 import mesa
-from IPython.terminal.shortcuts.auto_suggest import accept
 from mesa.discrete_space import OrthogonalMooreGrid
+from scipy.spatial.distance import chebyshev
+
 from agents import DeliveryAgent, DropOffLocationAgent
 
 
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_agents: int=5, width: int=25, height: int=25, num_drop_offs: int=5, agent_vision_radius: int=2, rng: int=None) -> None:
+    def __init__(self, num_agents: int=5, width: int=40, height: int=40, num_drop_offs: int=5, agent_vision_radius: int=2, rng: int=None) -> None:
         """
         A model for the implementation of BINT.
 
@@ -48,9 +49,7 @@ class BintWorldModel(mesa.Model):
                 continue
 
             if target_name in agent.known_drop_offs:
-                rx, ry = requester.cell.coordinate
-                ax, ay = agent.cell.coordinate
-                dist = abs(rx-ax) + abs(ry-ay)
+                dist = self.chebyshev_distance(requester.cell.coordinate, agent.cell.coordinate)
 
                 responses.append({"agent": agent, "dist": dist, "coord": agent.known_drop_offs[target_name]})
 
@@ -92,16 +91,22 @@ class BintWorldModel(mesa.Model):
         """
 
         # get the names of each drop off location
-        all_drop_offs = [d.unique_id for d in self.agents.select(agent_type=DropOffLocationAgent)]
+        all_drop_offs = [d for d in self.agents.select(agent_type=DropOffLocationAgent)]
 
         for agent in self.agents.select(agent_type=DeliveryAgent):
             if agent.goal_name is None:
                 # do not use previous drop off again
-                possible_destinations = [d for d in all_drop_offs if d != agent.prev_goal_name]
+                possible_destinations = [d for d in all_drop_offs if d.unique_id != agent.prev_goal_name]
 
                 if possible_destinations:
                     new_destination = self.random.choice(possible_destinations)
-                    agent.receive_package(new_destination)
+                    min_steps_to_destination = self.chebyshev_distance(agent.cell.coordinate, new_destination.cell.coordinate)
+                    package = {"destination": new_destination.unique_id, "max_steps": min_steps_to_destination}
+                    agent.receive_package(package)
+
+    @staticmethod
+    def chebyshev_distance(a: tuple, b: tuple) -> int:
+        return max(abs(a[0]-b[0]), abs(a[1] - b[1]))
 
     def step(self) -> None:
         self.agents.shuffle_do("step")

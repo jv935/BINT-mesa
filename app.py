@@ -51,9 +51,9 @@ model_params = {
 
 def agent_portrayal(agent: mesa.Agent):
     if isinstance(agent, DeliveryAgent):
-        return AgentPortrayalStyle(size=np.min([(agent.points+10)*2, 100]))
+        return AgentPortrayalStyle(size=50)
     elif isinstance(agent, DropOffLocationAgent):
-        return AgentPortrayalStyle(size=100, marker="s", color="black")
+        return AgentPortrayalStyle(size=50, marker="s", color="black")
     else:
         return None
 
@@ -65,7 +65,7 @@ def property_layer_portrayal(layer: mesa.discrete_space.PropertyLayer):
     return None
 
 
-bint = BintWorldModel(rng=13)
+bint = BintWorldModel(rng=293276)
 
 renderer = SpaceRenderer(model=bint, backend="matplotlib")
 renderer.draw_structure(lw=2, ls="solid", color="black", alpha=0.5)

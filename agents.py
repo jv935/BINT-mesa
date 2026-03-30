@@ -109,13 +109,13 @@ class DeliveryAgent(CellAgent):
                     self.update_internal_map(cell.coordinate, "floor")
 
 
-    def receive_package(self, new_goal: str) -> None:
+    def receive_package(self, package: dict) -> None:
         """
         Set new goal location.
 
-        :param new_goal: The new goal location.
+        :param package: The new goal location and the amount of time before expiration.
         """
-        self.goal_name = new_goal
+        self.goal_name = package["destination"]
 
 
     def select_unexplored_coordinate(self) -> None|tuple[int, int]:
