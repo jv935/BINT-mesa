@@ -22,6 +22,8 @@ class BintWorldModel(mesa.Model):
         self.num_agents = num_agents
         self.num_drop_offs = num_drop_offs
         self.agent_vision_radius = agent_vision_radius
+        self.packages_to_be_delivered = {}
+
         self.grid = OrthogonalMooreGrid((width, height), torus=False, random=self.random)
 
         self.drop_off_cells = self.random.sample(self.grid.all_cells.cells, k=self.num_drop_offs)
@@ -101,8 +103,11 @@ class BintWorldModel(mesa.Model):
                 if possible_destinations:
                     new_destination = self.random.choice(possible_destinations)
                     min_steps_to_destination = self.chebyshev_distance(agent.cell.coordinate, new_destination.cell.coordinate)
-                    package = {"destination": new_destination.unique_id, "max_steps": min_steps_to_destination}
+                    steps_to_deliver = int(min_steps_to_destination * (self.random.betavariate(5, 5) + 1) + 1)
+
+                    package = {"destination": new_destination.unique_id, "max_steps": steps_to_deliver}
                     agent.receive_package(package)
+                    self.packages_to_be_delivered[agent.unique_id] = package
 
     @staticmethod
     def chebyshev_distance(a: tuple, b: tuple) -> int:
