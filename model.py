@@ -1,7 +1,5 @@
 import mesa
 from mesa.discrete_space import OrthogonalMooreGrid
-from scipy.spatial.distance import chebyshev
-
 from agents import DeliveryAgent, DropOffLocationAgent
 
 
@@ -22,7 +20,7 @@ class BintWorldModel(mesa.Model):
         self.num_agents = num_agents
         self.num_drop_offs = num_drop_offs
         self.agent_vision_radius = agent_vision_radius
-        self.packages_to_be_delivered = {}
+        #self.packages_to_be_delivered = {}
 
         self.grid = OrthogonalMooreGrid((width, height), torus=False, random=self.random)
 
@@ -43,7 +41,7 @@ class BintWorldModel(mesa.Model):
         self.datacollector.collect(self)
 
 
-    def request_map_data(self, requester: mesa.discrete_space.CellAgent, target_name: str) -> bool:
+    def request_map_data(self, requester: DeliveryAgent, target_name: str) -> bool:
         responses = []
 
         for agent in self.agents.select(agent_type=DeliveryAgent):
@@ -53,7 +51,8 @@ class BintWorldModel(mesa.Model):
             if target_name in agent.known_drop_offs:
                 dist = self.chebyshev_distance(requester.cell.coordinate, agent.cell.coordinate)
 
-                responses.append({"agent": agent, "dist": dist, "coord": agent.known_drop_offs[target_name]})
+                if self.random.random() > 0.65:
+                    responses.append({"agent": agent, "dist": dist, "coord": agent.known_drop_offs[target_name]})
 
         responses.sort(key=lambda x: x["dist"])
 
@@ -63,6 +62,7 @@ class BintWorldModel(mesa.Model):
             return True
 
         return False
+
 
     def distribute_initial_knowledge(self) -> None:
         """
@@ -103,15 +103,56 @@ class BintWorldModel(mesa.Model):
                 if possible_destinations:
                     new_destination = self.random.choice(possible_destinations)
                     min_steps_to_destination = self.chebyshev_distance(agent.cell.coordinate, new_destination.cell.coordinate)
-                    steps_to_deliver = int(min_steps_to_destination * (self.random.betavariate(5, 5) + 1) + 1)
+                    max_steps_to_destination = int(min_steps_to_destination * (self.random.betavariate(5, 5) + 1) + 1)
 
-                    package = {"destination": new_destination.unique_id, "max_steps": steps_to_deliver}
+                    package = {
+                        "destination": new_destination.unique_id,
+                        "max_steps": max_steps_to_destination,
+                        "min_steps": min_steps_to_destination,
+                        "steps_taken": 0,
+                    }
+
                     agent.receive_package(package)
-                    self.packages_to_be_delivered[agent.unique_id] = package
+                    #self.packages_to_be_delivered[agent.unique_id] = package
+
+
+    def verify_delivery(self, agent: DeliveryAgent, package: dict):
+        base_points = 5.0
+        agents_on_cell = [a.unique_id for a in agent.cell.agents]
+
+        if agent.goal_name in agents_on_cell:
+            min_steps = package["min_steps"]
+            max_steps = package["max_steps"]
+            steps_taken = package["steps_taken"]
+
+            window = max_steps - min_steps
+            grace_steps = min_steps + int(window * 0.3)
+
+            if steps_taken <= grace_steps:
+                points_awarded = base_points
+
+            elif steps_taken <= max_steps:
+                if max_steps > grace_steps:
+                    decay_ratio = (max_steps - steps_taken) / (max_steps - grace_steps)
+                    points_awarded = float(base_points * decay_ratio)
+                else:
+                    points_awarded = 0.0
+
+            else:
+                lateness = steps_taken - max_steps
+                points_awarded = max(-base_points * 2, float(-lateness * 0.5))
+
+            agent.points += points_awarded
+
+            return True
+
+        return False
+
 
     @staticmethod
     def chebyshev_distance(a: tuple, b: tuple) -> int:
         return max(abs(a[0]-b[0]), abs(a[1] - b[1]))
+
 
     def step(self) -> None:
         self.agents.shuffle_do("step")

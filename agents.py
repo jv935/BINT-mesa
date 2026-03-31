@@ -21,6 +21,7 @@ class DeliveryAgent(CellAgent):
         self.target_coordinate = None
         self.vision_radius = vision_radius
         self.points = 0
+        self.package = None
 
 
     def move(self) -> None:
@@ -47,13 +48,19 @@ class DeliveryAgent(CellAgent):
         if dx != 0 or dy != 0:
             self.move_relative((dx, dy))
 
+        # could maybe check if the agent is on cell from the get-go?
+        # would need to change a bunch of stuff tho
+
         if self.cell.coordinate == self.target_coordinate:
             agents_on_cell = [a.unique_id for a in self.cell.agents]
             # if the delivery location is here
             if self.state == "DELIVERING" and self.goal_name in agents_on_cell:
-                self.points += 1
-                self.prev_goal_name = self.goal_name
-                self.goal_name = None
+                success = self.model.verify_delivery(self, self.package)
+
+                if success:
+                    self.prev_goal_name = self.goal_name
+                    self.goal_name = None
+                    self.package = None
 
             self.state = None
             self.target_coordinate = None
@@ -115,7 +122,9 @@ class DeliveryAgent(CellAgent):
 
         :param package: The new goal location and the amount of time before expiration.
         """
-        self.goal_name = package["destination"]
+        self.package = package
+        self.goal_name = self.package["destination"]
+        self.package["steps_taken"] = 0
 
 
     def select_unexplored_coordinate(self) -> None|tuple[int, int]:
@@ -139,6 +148,8 @@ class DeliveryAgent(CellAgent):
 
     def step(self) -> None:
         self.perceive_env()
+
+        self.package["steps_taken"] += 1
 
         if self.goal_name is None:
             return
