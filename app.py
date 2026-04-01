@@ -14,14 +14,14 @@ from mesa.visualization.utils import update_counter
 
 
 model_params = {
-    "num_agents": {
-        "type": "SliderInt",
-        "value": 5,
-        "label": "Number of agents",
-        "min": 1,
-        "max": 20,
-        "step": 1,
-    },
+    # "num_agents": {
+    #     "type": "SliderInt",
+    #     "value": 5,
+    #     "label": "Number of agents",
+    #     "min": 1,
+    #     "max": 20,
+    #     "step": 1,
+    # },
     "num_drop_offs": {
         "type": "SliderInt",
         "value": 3,

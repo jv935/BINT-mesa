@@ -1,14 +1,14 @@
 import mesa
 from mesa.discrete_space import OrthogonalMooreGrid
-from agents import DeliveryAgent, DropOffLocationAgent
+from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 
 
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_agents: int=5, width: int=40, height: int=40, num_drop_offs: int=5, agent_vision_radius: int=2, rng: int=None) -> None:
+    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, width: int=40, height: int=40, agent_vision_radius: int=2, rng: int=None) -> None:
         """
         A model for the implementation of BINT.
 
-        :param num_agents: The number of delivery agents.
+        :param agent_counts: A dictionary storing the type of agent along with the amount.
         :param width: The width of the grid.
         :param height: The height of the grid.
         :param num_drop_offs: The number of drop-off locations.
@@ -17,31 +17,48 @@ class BintWorldModel(mesa.Model):
         """
 
         super().__init__(rng=rng)
-        self.num_agents = num_agents
+
+        if agent_counts is None:
+            agent_counts = {
+                DeliveryAgent: 7,
+                MaliciousMapDeliveryAgent: 3
+            }
+
+        self.agent_counts = agent_counts
         self.num_drop_offs = num_drop_offs
         self.agent_vision_radius = agent_vision_radius
-        #self.packages_to_be_delivered = {}
+        self.total_delivery_agents = sum(self.agent_counts.values())
 
         self.grid = OrthogonalMooreGrid((width, height), torus=False, random=self.random)
 
         self.drop_off_cells = self.random.sample(self.grid.all_cells.cells, k=self.num_drop_offs)
-        self.agent_spawn_cells = self.random.sample(self.grid.all_cells.cells, k=self.num_agents)
+        self.agent_spawn_cells = self.random.sample(self.grid.all_cells.cells, k=self.total_delivery_agents)
 
-        DeliveryAgent.create_agents(self, self.num_agents, self.agent_spawn_cells, self.agent_vision_radius)
+        spawn_idx = 0
+        for AgentClass, count in agent_counts.items():
+            if count > 0:
+                cells_for_current_class = self.agent_spawn_cells[spawn_idx:spawn_idx+count]
+                AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius)
+                spawn_idx += count
+
         DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
+
+        # DeliveryAgent.create_agents(self, self.num_agents, self.agent_spawn_cells[:num_agents], self.agent_vision_radius)
+        # MaliciousMapDeliveryAgent.create_agents(self, self.num_agents, self.agent_spawn_cells[num_agents:], self.agent_vision_radius)
+        # DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
 
         self.distribute_initial_knowledge()
         self.dispatch_packages()
 
         self.datacollector = mesa.DataCollector(
-            model_reporters={"Number of Agents": "num_agents"},
+            model_reporters={"Number of Agents": "total_delivery_agents"},
             agenttype_reporters={DeliveryAgent: {"Points": "points"}}
         )
 
         self.datacollector.collect(self)
 
 
-    def request_map_data(self, requester: DeliveryAgent, target_name: str) -> bool:
+    def request_map_data(self, requester: DeliveryAgent, target_name: str) -> list:
         responses = []
 
         for agent in self.agents.select(agent_type=DeliveryAgent):
@@ -49,19 +66,24 @@ class BintWorldModel(mesa.Model):
                 continue
 
             if target_name in agent.known_drop_offs:
-                dist = self.chebyshev_distance(requester.cell.coordinate, agent.cell.coordinate)
+                agent_resp = agent.share_map(requester, target_name)
 
-                if self.random.random() > 0.65:
-                    responses.append({"agent": agent, "dist": dist, "coord": agent.known_drop_offs[target_name]})
+                if agent_resp is None:
+                    continue
+
+                dist = self.chebyshev_distance(requester.cell.coordinate, agent.cell.coordinate)
+                responses.append({"agent": agent.unique_id, "dist": dist, "coord": agent_resp})
 
         responses.sort(key=lambda x: x["dist"])
 
-        for response in responses:
-            # Always accept for now
-            requester.update_internal_map(response["coord"], "drop_off", response["agent"], target_name)
-            return True
+        return responses
 
-        return False
+        # for response in responses:
+        #     # Always accept for now
+        #     requester.update_internal_map(response["coord"], "drop_off", response["agent"], target_name)
+        #     return True
+        #
+        # return False
 
 
     def distribute_initial_knowledge(self) -> None:
@@ -77,7 +99,7 @@ class BintWorldModel(mesa.Model):
         self.random.shuffle(delivery_agents)
 
         for i, drop_off in enumerate(drop_offs):
-            receiving_agent = delivery_agents[i % self.num_agents]
+            receiving_agent = delivery_agents[i % self.total_delivery_agents]
 
             receiving_agent.update_internal_map(
                 coordinate=drop_off.cell.coordinate,
@@ -85,6 +107,7 @@ class BintWorldModel(mesa.Model):
                 info_source="system",
                 drop_off_name=drop_off.unique_id
             )
+
 
     def dispatch_packages(self) -> None:
         """
@@ -117,7 +140,7 @@ class BintWorldModel(mesa.Model):
 
 
     def verify_delivery(self, agent: DeliveryAgent, package: dict):
-        base_points = 5.0
+        base_points = 1.0
         agents_on_cell = [a.unique_id for a in agent.cell.agents]
 
         if agent.goal_name in agents_on_cell:
