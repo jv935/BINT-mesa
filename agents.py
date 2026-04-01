@@ -1,5 +1,7 @@
 import mesa
 from mesa.discrete_space import CellAgent, FixedAgent
+from typing_extensions import override
+
 
 class DeliveryAgent(CellAgent):
     def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int) -> None:
@@ -54,13 +56,21 @@ class DeliveryAgent(CellAgent):
         if self.cell.coordinate == self.target_coordinate:
             agents_on_cell = [a.unique_id for a in self.cell.agents]
             # if the delivery location is here
-            if self.state == "DELIVERING" and self.goal_name in agents_on_cell:
-                success = self.model.verify_delivery(self, self.package)
+            if self.state == "DELIVERING":
+                if self.goal_name in agents_on_cell:
+                    success = self.model.verify_delivery(self, self.package)
 
-                if success:
-                    self.prev_goal_name = self.goal_name
-                    self.goal_name = None
-                    self.package = None
+                    if success:
+                        self.prev_goal_name = self.goal_name
+                        self.goal_name = None
+                        self.package = None
+
+                else:
+                    if self.goal_name in self.known_drop_offs:
+                        del self.known_drop_offs[self.goal_name]
+
+                    if self.target_coordinate in self.internal_map:
+                        del self.internal_map[self.target_coordinate]
 
             self.state = None
             self.target_coordinate = None
@@ -92,6 +102,15 @@ class DeliveryAgent(CellAgent):
         # If it's a drop-off add it to the drop-off index
         if drop_off_name is not None:
             self.known_drop_offs[drop_off_name] = coordinate
+
+
+    def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
+        # should have some trust evaluation here
+        if self.random.random() <= 1.0:
+            if target in self.known_drop_offs:
+                return self.known_drop_offs[target]
+
+        return None
 
 
     def perceive_env(self) -> None:
@@ -158,7 +177,17 @@ class DeliveryAgent(CellAgent):
             self.target_coordinate = self.known_drop_offs[self.goal_name]
             self.state = "DELIVERING"
         elif self.state is None or (self.state == "EXPLORING" and self.target_coordinate in self.internal_map):
-            success = self.model.request_map_data(self, self.goal_name)
+            responses = self.model.request_map_data(self, self.goal_name)
+            success = False
+
+            for response in responses:
+                # should do some trust stuff here
+                if self.random.random() > 0.5:
+                    self.update_internal_map(response["coord"], "drop_off", response["agent"], self.goal_name)
+
+                    if self.goal_name in self.known_drop_offs:
+                        success = True
+                        break
 
             if success:
                 self.target_coordinate = self.known_drop_offs[self.goal_name]
@@ -183,3 +212,22 @@ class DropOffLocationAgent(FixedAgent):
 
         super().__init__(model)
         self.cell = cell
+
+
+
+class MaliciousMapDeliveryAgent(DeliveryAgent):
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: int=0.2) -> None:
+        super().__init__(model, cell, vision_radius)
+        self.maliciousness = maliciousness
+
+    @override
+    def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
+        if self.random.random() <= self.maliciousness:
+            if target in self.known_drop_offs:
+                while True:
+                    false_coord = (self.random.randint(0, self.model.grid.width-1), self.random.randint(0, self.model.grid.height-1))
+
+                    if false_coord != self.known_drop_offs[target]:
+                        return false_coord
+
+        super().share_map(requester, target)
