@@ -22,6 +22,22 @@ model_params = {
     #     "max": 20,
     #     "step": 1,
     # },
+    "num_delivery": {
+        "type": "SliderInt",
+        "value": 8,
+        "label": "Number of honest delivery agents",
+        "min": -1,
+        "max": 20,
+        "step": 1,
+    },
+    "num_map_malicious": {
+        "type": "SliderInt",
+        "value": 2,
+        "label": "Number of malicious agents",
+        "min": -1,
+        "max": 20,
+        "step": 1,
+    },
     "num_drop_offs": {
         "type": "SliderInt",
         "value": 3,
@@ -32,18 +48,18 @@ model_params = {
     },
     "width": {
         "type": "SliderInt",
-        "value": 10,
+        "value": 50,
         "label": "Width",
         "min": 1,
-        "max": 100,
+        "max": 150,
         "step": 1,
     },
     "height": {
         "type": "SliderInt",
-        "value": 10,
+        "value": 50,
         "label": "Height",
         "min": 1,
-        "max": 100,
+        "max": 150,
         "step": 1,
     }
 }
