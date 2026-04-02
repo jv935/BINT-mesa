@@ -24,6 +24,22 @@ class DeliveryAgent(CellAgent):
         self.vision_radius = vision_radius
         self.points = 0
         self.package = None
+        self.current_provider_id = None
+
+
+    def calculate_trust(self, target_agent_id: str) -> float:
+        global_reputation = self.model.calc_global_trust(target_agent_id)
+        all_target_tnfts = [nft for nft in self.model.tnft_ledger if nft["receiver"] == target_agent_id]
+        direct_experiences = [nft for nft in all_target_tnfts if nft["issuer"] == self.unique_id]
+
+        if not direct_experiences:
+            return global_reputation
+        else:
+            pos_direct = sum(1 for nft in direct_experiences if nft["positive"])
+            local_trust = float(pos_direct/max(3, len(direct_experiences)))
+
+            blended_trust = (0.7 * local_trust) + (0.3 * global_reputation)
+            return blended_trust
 
 
     def move(self) -> None:
@@ -61,11 +77,27 @@ class DeliveryAgent(CellAgent):
                     success = self.model.verify_delivery(self, self.package)
 
                     if success:
+                        if self.current_provider_id is not None:
+                            self.model.mint_tnft(
+                                issuer_id=self.unique_id,
+                                receiver_id=self.current_provider_id,
+                                interaction_type="map_data",
+                                is_positive=True
+                            )
+
                         self.prev_goal_name = self.goal_name
                         self.goal_name = None
                         self.package = None
 
                 else:
+                    if self.current_provider_id is not None:
+                        self.model.mint_tnft(
+                            issuer_id=self.unique_id,
+                            receiver_id=self.current_provider_id,
+                            interaction_type="map_data",
+                            is_positive=False
+                        )
+
                     if self.goal_name in self.known_drop_offs:
                         del self.known_drop_offs[self.goal_name]
 
@@ -74,6 +106,7 @@ class DeliveryAgent(CellAgent):
 
             self.state = None
             self.target_coordinate = None
+            self.current_provider_id = None
 
 
     def update_internal_map(self, coordinate: tuple[int], env_type: str, info_source: str="self", drop_off_name: str|None=None) -> None:
@@ -105,8 +138,9 @@ class DeliveryAgent(CellAgent):
 
 
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
-        # should have some trust evaluation here
-        if self.random.random() <= 1.0:
+        requester_trust = self.calculate_trust(requester.unique_id)
+
+        if requester_trust > 0.7 or self.random.random() < requester_trust/2.0:
             if target in self.known_drop_offs:
                 return self.known_drop_offs[target]
 
@@ -168,10 +202,10 @@ class DeliveryAgent(CellAgent):
     def step(self) -> None:
         self.perceive_env()
 
-        self.package["steps_taken"] += 1
-
         if self.goal_name is None:
             return
+
+        self.package["steps_taken"] += 1
 
         if self.goal_name in self.known_drop_offs.keys() and self.state != "DELIVERING":
             self.target_coordinate = self.known_drop_offs[self.goal_name]
@@ -181,11 +215,15 @@ class DeliveryAgent(CellAgent):
             success = False
 
             for response in responses:
-                # should do some trust stuff here
-                if self.random.random() > 0.5:
+                provider_id = response["agent"]
+
+                provider_trust = self.calculate_trust(provider_id)
+
+                if provider_trust > 0.7 or self.random.random() < provider_trust/2.0:
                     self.update_internal_map(response["coord"], "drop_off", response["agent"], self.goal_name)
 
                     if self.goal_name in self.known_drop_offs:
+                        self.current_provider_id = provider_id
                         success = True
                         break
 
