@@ -34,6 +34,8 @@ class BintWorldModel(mesa.Model):
         self.drop_off_cells = self.random.sample(self.grid.all_cells.cells, k=self.num_drop_offs)
         self.agent_spawn_cells = self.random.sample(self.grid.all_cells.cells, k=self.total_delivery_agents)
 
+        self.tnft_ledger = []
+
         spawn_idx = 0
         for AgentClass, count in agent_counts.items():
             if count > 0:
@@ -49,6 +51,7 @@ class BintWorldModel(mesa.Model):
 
         self.distribute_initial_knowledge()
         self.dispatch_packages()
+        self.seed_genesis_tnfts()
 
         self.datacollector = mesa.DataCollector(
             model_reporters={"Number of Agents": "total_delivery_agents"},
@@ -56,6 +59,44 @@ class BintWorldModel(mesa.Model):
         )
 
         self.datacollector.collect(self)
+
+
+    def seed_genesis_tnfts(self) -> None:
+        for agent in self.agents.select(agent_type=DeliveryAgent):
+            self.mint_tnft(
+                issuer_id="SYSTEM",
+                receiver_id=agent.unique_id,
+                interaction_type="genesis",
+                is_positive=True
+            )
+
+
+    def calc_global_trust(self, agent_id: str) -> float:
+        agent_tnfts = [nft for nft in self.tnft_ledger if nft["receiver"] == agent_id]
+
+        if not agent_tnfts:
+            return 0.0
+
+        pos_tnfts = sum(1 for nft in agent_tnfts if nft["positive"])
+        total_count = max(5, len(agent_tnfts))
+
+        return float(pos_tnfts/total_count)
+
+
+    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str, is_positive: bool) -> None:
+        tnft = {
+            "issuer": issuer_id,
+            "receiver": receiver_id,
+            "type": interaction_type,
+            "positive": is_positive,
+            "timestamp": self.time
+        }
+        self.tnft_ledger.append(tnft)
+        # else:
+        #     agent_tnfts = [nft for nft in self.tnft_ledger if nft["receiver"] == receiver_id]
+        #
+        #     if agent_tnfts:
+        #         self.random.choice(agent_tnfts)["receiver"] = "null"
 
 
     def request_map_data(self, requester: DeliveryAgent, target_name: str) -> list:
