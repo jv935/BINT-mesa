@@ -4,7 +4,7 @@ from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgen
 
 
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, width: int=40, height: int=40, agent_vision_radius: int=2, rng: int=None) -> None:
+    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=-1, num_map_malicious: int=-1, width: int=50, height: int=50, agent_vision_radius: int=2, rng: int=None) -> None:
         """
         A model for the implementation of BINT.
 
@@ -20,8 +20,8 @@ class BintWorldModel(mesa.Model):
 
         if agent_counts is None:
             agent_counts = {
-                DeliveryAgent: 7,
-                MaliciousMapDeliveryAgent: 3
+                DeliveryAgent: (7 if num_delivery == -1 else num_delivery),
+                MaliciousMapDeliveryAgent: (3 if num_map_malicious == -1 else num_map_malicious),
             }
 
         self.agent_counts = agent_counts
@@ -54,7 +54,6 @@ class BintWorldModel(mesa.Model):
         self.seed_genesis_tnfts()
 
         self.datacollector = mesa.DataCollector(
-            model_reporters={"Number of Agents": "total_delivery_agents"},
             agenttype_reporters={DeliveryAgent: {"Points": "points"}}
         )
 
