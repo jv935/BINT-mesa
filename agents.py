@@ -143,7 +143,7 @@ class DeliveryAgent(CellAgent):
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
         requester_trust = self.calculate_trust(requester.unique_id)
 
-        if requester_trust > 0.7 or self.random.random() < requester_trust/2.0:
+        if requester_trust > 0.7 or self.random.random() < min(0.5, requester_trust):
             if target in self.known_drop_offs:
                 return self.known_drop_offs[target]
 
@@ -222,7 +222,7 @@ class DeliveryAgent(CellAgent):
 
                 provider_trust = self.calculate_trust(provider_id)
 
-                if provider_trust > 0.7 or self.random.random() < provider_trust/2.0:
+                if provider_trust > 0.7 or self.random.random() < min(0.5, provider_trust):
                     self.update_internal_map(response["coord"], "drop_off", response["agent"], self.goal_name)
 
                     if self.goal_name in self.known_drop_offs:
@@ -263,12 +263,7 @@ class MaliciousMapDeliveryAgent(DeliveryAgent):
 
     @override
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
-        if self.random.random() <= self.maliciousness:
-            if target in self.known_drop_offs:
-                while True:
-                    false_coord = (self.random.randint(0, self.model.grid.width-1), self.random.randint(0, self.model.grid.height-1))
+        if self.model.calc_global_trust(self.unique_id) >= 0.5 and self.random.random() <= self.maliciousness:
+            return self.random.randint(0, self.model.grid.width-1), self.random.randint(0, self.model.grid.height-1)
 
-                    if false_coord != self.known_drop_offs[target]:
-                        return false_coord
-
-        super().share_map(requester, target)
+        return super().share_map(requester, target)

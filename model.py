@@ -71,12 +71,13 @@ class BintWorldModel(mesa.Model):
 
     def seed_genesis_tnfts(self) -> None:
         for agent in self.agents.select(agent_type=DeliveryAgent):
-            self.mint_tnft(
-                issuer_id="SYSTEM",
-                receiver_id=agent.unique_id,
-                interaction_type="genesis",
-                is_positive=True
-            )
+            for _ in range(2):
+                self.mint_tnft(
+                    issuer_id="SYSTEM",
+                    receiver_id=agent.unique_id,
+                    interaction_type="genesis",
+                    is_positive=True
+                )
 
 
     def calc_global_trust(self, agent_id: str) -> float:
