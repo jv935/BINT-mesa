@@ -4,7 +4,7 @@ from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgen
 
 
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=-1, num_map_malicious: int=-1, width: int=50, height: int=50, agent_vision_radius: int=2, rng: int=None) -> None:
+    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=-1, num_map_malicious: int=-1, width: int=50, height: int=50, agent_vision_radius: int=2, rng: int|str=None) -> None:
         """
         A model for the implementation of BINT.
 
@@ -16,7 +16,7 @@ class BintWorldModel(mesa.Model):
         :param rng: Random generation seed.
         """
 
-        super().__init__(rng=rng)
+        super().__init__(rng=int(rng))
 
         if agent_counts is None:
             agent_counts = {
