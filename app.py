@@ -1,12 +1,10 @@
 import numpy as np
-import pandas as pd
 import mesa
 from matplotlib.ticker import MaxNLocator
 from mesa.visualization import SolaraViz, SpaceRenderer
 from mesa.visualization.components import AgentPortrayalStyle, PropertyLayerStyle
-from numpy import integer
 
-from agents import DeliveryAgent, DropOffLocationAgent
+from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 from model import BintWorldModel
 import solara
 from matplotlib.figure import Figure
@@ -22,6 +20,11 @@ model_params = {
     #     "max": 20,
     #     "step": 1,
     # },
+    "rng": {
+        "type": "InputText",
+        "value": 293276,
+        "label": "Random seed",
+    },
     "num_delivery": {
         "type": "SliderInt",
         "value": 8,
@@ -66,8 +69,10 @@ model_params = {
 
 
 def agent_portrayal(agent: mesa.Agent):
-    if isinstance(agent, DeliveryAgent):
-        return AgentPortrayalStyle(size=50)
+    if isinstance(agent, MaliciousMapDeliveryAgent):
+        return AgentPortrayalStyle(size=50, color="red")
+    elif isinstance(agent, DeliveryAgent):
+        return AgentPortrayalStyle(size=50, color="blue")
     elif isinstance(agent, DropOffLocationAgent):
         return AgentPortrayalStyle(size=50, marker="s", color="black")
     else:
