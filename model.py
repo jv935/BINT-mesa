@@ -53,8 +53,17 @@ class BintWorldModel(mesa.Model):
         self.dispatch_packages()
         self.seed_genesis_tnfts()
 
+        tracking_parameters = {
+            "Points": "points",
+            "Deliveries": "delivery_count",
+            "Global Trust": lambda a: self.calc_global_trust(a.unique_id)
+        }
+
         self.datacollector = mesa.DataCollector(
-            agenttype_reporters={DeliveryAgent: {"Points": "points"}}
+            agenttype_reporters={
+                DeliveryAgent: tracking_parameters,
+                MaliciousMapDeliveryAgent: tracking_parameters
+            }
         )
 
         self.datacollector.collect(self)

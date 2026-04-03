@@ -25,6 +25,7 @@ class DeliveryAgent(CellAgent):
         self.points = 0
         self.package = None
         self.current_provider_id = None
+        self.delivery_count = 0
 
 
     def calculate_trust(self, target_agent_id: str) -> float:
@@ -77,6 +78,8 @@ class DeliveryAgent(CellAgent):
                     success = self.model.verify_delivery(self, self.package)
 
                     if success:
+                        self.delivery_count += 1
+
                         if self.current_provider_id is not None:
                             self.model.mint_tnft(
                                 issuer_id=self.unique_id,
@@ -254,7 +257,7 @@ class DropOffLocationAgent(FixedAgent):
 
 
 class MaliciousMapDeliveryAgent(DeliveryAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: int=0.2) -> None:
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: int=0.3) -> None:
         super().__init__(model, cell, vision_radius)
         self.maliciousness = maliciousness
 
