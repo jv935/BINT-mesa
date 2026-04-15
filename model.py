@@ -3,8 +3,17 @@ from mesa.discrete_space import OrthogonalMooreGrid
 from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 
 
+def get_points(model):
+    return model.agents.get("points")
+
+def get_delivery_count(model):
+    return model.agents.get("delivery_count")
+
+def get_global_rep(model):
+    return model.agents.get("global_rep")
+
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=-1, num_map_malicious: int=-1, width: int=50, height: int=50, agent_vision_radius: int=2, rng: int|str=None) -> None:
+    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=5, num_map_malicious: int=2, width: int=50, height: int=50, agent_vision_radius: int=2, rng: int|str=None) -> None:
         """
         A model for the implementation of BINT.
 
@@ -16,12 +25,12 @@ class BintWorldModel(mesa.Model):
         :param rng: Random generation seed.
         """
 
-        super().__init__(rng=int(rng))
+        super().__init__(rng=(int(rng) if rng else None))
 
         if agent_counts is None:
             agent_counts = {
-                DeliveryAgent: (7 if num_delivery == -1 else num_delivery),
-                MaliciousMapDeliveryAgent: (3 if num_map_malicious == -1 else num_map_malicious),
+                DeliveryAgent:num_delivery,
+                MaliciousMapDeliveryAgent: num_map_malicious,
             }
 
         self.agent_counts = agent_counts
@@ -56,10 +65,16 @@ class BintWorldModel(mesa.Model):
         tracking_parameters = {
             "Points": "points",
             "Deliveries": "delivery_count",
-            "Global Trust": lambda a: self.calc_global_trust(a.unique_id)
+            "Global Trust": "global_rep"
         }
 
         self.datacollector = mesa.DataCollector(
+            model_reporters={
+                "Points": get_points,
+                "Deliveries": get_delivery_count,
+                "Global Trust": get_global_rep,
+            },
+            agent_reporters=tracking_parameters,
             agenttype_reporters={
                 DeliveryAgent: tracking_parameters,
                 MaliciousMapDeliveryAgent: tracking_parameters
