@@ -3,14 +3,11 @@ from mesa.discrete_space import OrthogonalMooreGrid
 from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 
 
-def get_points(model):
-    return model.agents.get("points")
+def get_agent_type(agent):
+    return type(agent).__name__
 
-def get_delivery_count(model):
-    return model.agents.get("delivery_count")
-
-def get_global_rep(model):
-    return model.agents.get("global_rep")
+def get_ledger_size(model):
+    return len(model.tnft_ledger)
 
 class BintWorldModel(mesa.Model):
     def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=5, num_map_malicious: int=2, width: int=50, height: int=50, agent_vision_radius: int=2, rng: int|str=None) -> None:
@@ -63,18 +60,22 @@ class BintWorldModel(mesa.Model):
         self.seed_genesis_tnfts()
 
         tracking_parameters = {
+            "Agent Type": get_agent_type,
+            "State": "state",
             "Points": "points",
             "Deliveries": "delivery_count",
-            "Global Trust": "global_rep"
+            "Global Trust": "global_rep",
+            "Positive TNFTs": "positive_tnfts",
+            "Negative TNFTs": "negative_tnfts",
+            "Map Size": "map_size",
+            "Known Drop-Offs": "known_drop_offs_count",
+            "Steps on Package": "steps_on_package"
         }
 
         self.datacollector = mesa.DataCollector(
             model_reporters={
-                "Points": get_points,
-                "Deliveries": get_delivery_count,
-                "Global Trust": get_global_rep,
+                "Ledger Size": get_ledger_size,
             },
-            agent_reporters=tracking_parameters,
             agenttype_reporters={
                 DeliveryAgent: tracking_parameters,
                 MaliciousMapDeliveryAgent: tracking_parameters
