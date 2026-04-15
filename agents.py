@@ -26,20 +26,21 @@ class DeliveryAgent(CellAgent):
         self.package = None
         self.current_provider_id = None
         self.delivery_count = 0
+        self.global_rep = 0
 
 
     def calculate_trust(self, target_agent_id: str) -> float:
-        global_reputation = self.model.calc_global_trust(target_agent_id)
+        global_rep = self.model.calc_global_trust(target_agent_id)
         all_target_tnfts = [nft for nft in self.model.tnft_ledger if nft["receiver"] == target_agent_id]
         direct_experiences = [nft for nft in all_target_tnfts if nft["issuer"] == self.unique_id]
 
         if not direct_experiences:
-            return global_reputation
+            return global_rep
         else:
             pos_direct = sum(1 for nft in direct_experiences if nft["positive"])
             local_trust = float(pos_direct/max(3, len(direct_experiences)))
 
-            blended_trust = (0.7 * local_trust) + (0.3 * global_reputation)
+            blended_trust = (0.7 * local_trust) + (0.3 * global_rep)
             return blended_trust
 
 
@@ -253,6 +254,10 @@ class DropOffLocationAgent(FixedAgent):
 
         super().__init__(model)
         self.cell = cell
+
+        self.points = None
+        self.delivery_count = None
+        self.global_rep = None
 
 
 
