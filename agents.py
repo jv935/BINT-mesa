@@ -19,14 +19,37 @@ class DeliveryAgent(CellAgent):
         self.known_drop_offs = {}
         self.goal_name = None
         self.prev_goal_name = None
-        self.state = None
+        self.state = "IDLE"
         self.target_coordinate = None
         self.vision_radius = vision_radius
         self.points = 0
         self.package = None
         self.current_provider_id = None
         self.delivery_count = 0
-        self.global_rep = 0
+
+    @property
+    def global_rep(self) -> float:
+        return self.model.calc_global_trust(self.unique_id)
+
+    @property
+    def map_size(self) -> int:
+        return len(self.internal_map)
+
+    @property
+    def known_drop_offs_count(self) -> int:
+        return len(self.known_drop_offs)
+
+    @property
+    def steps_on_package(self) -> int:
+        return self.package["steps_taken"] if self.package else 0
+
+    @property
+    def positive_tnfts(self) -> int:
+        return sum(1 for nft in self.model.tnft_ledger if nft["receiver"] == self.unique_id and nft["positive"])
+
+    @property
+    def negative_tnfts(self) -> int:
+        return sum(1 for nft in self.model.tnft_ledger if nft["receiver"] == self.unique_id and not nft["positive"])
 
 
     def calculate_trust(self, target_agent_id: str) -> float:
@@ -108,7 +131,7 @@ class DeliveryAgent(CellAgent):
                     if self.target_coordinate in self.internal_map:
                         del self.internal_map[self.target_coordinate]
 
-            self.state = None
+            self.state = "IDLE"
             self.target_coordinate = None
             self.current_provider_id = None
 
