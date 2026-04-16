@@ -10,13 +10,12 @@ def get_ledger_size(model):
     return len(model.tnft_ledger)
 
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=5, num_map_malicious: int=2, width: int=50, height: int=50, agent_vision_radius: int=2, rng: int|str=None) -> None:
+    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=5, num_map_malicious: int=2, size: tuple[int] = (50, 50), agent_vision_radius: int=2, rng: int|str=None) -> None:
         """
         A model for the implementation of BINT.
 
         :param agent_counts: A dictionary storing the type of agent along with the amount.
-        :param width: The width of the grid.
-        :param height: The height of the grid.
+        :param size: The width and height of the grid.
         :param num_drop_offs: The number of drop-off locations.
         :param agent_vision_radius: The vision radius of the delivery agents.
         :param rng: Random generation seed.
@@ -35,7 +34,7 @@ class BintWorldModel(mesa.Model):
         self.agent_vision_radius = agent_vision_radius
         self.total_delivery_agents = sum(self.agent_counts.values())
 
-        self.grid = OrthogonalMooreGrid((width, height), torus=False, random=self.random)
+        self.grid = OrthogonalMooreGrid(size, torus=False, random=self.random)
 
         self.drop_off_cells = self.random.sample(self.grid.all_cells.cells, k=self.num_drop_offs)
         self.agent_spawn_cells = self.random.sample(self.grid.all_cells.cells, k=self.total_delivery_agents)
