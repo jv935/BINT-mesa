@@ -285,13 +285,15 @@ class DropOffLocationAgent(FixedAgent):
 
 
 class MaliciousMapDeliveryAgent(DeliveryAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: int=0.3) -> None:
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: float=1.0) -> None:
         super().__init__(model, cell, vision_radius)
         self.maliciousness = maliciousness
 
     @override
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
-        if self.model.calc_global_trust(self.unique_id) >= 0.5 and self.random.random() <= self.maliciousness:
+        # if self.model.calc_global_trust(self.unique_id) >= 0.5 and self.random.random() <= self.maliciousness:
+        if self.random.random() <= self.maliciousness:
             return self.random.randint(0, self.model.grid.width-1), self.random.randint(0, self.model.grid.height-1)
+        
 
         return super().share_map(requester, target)
