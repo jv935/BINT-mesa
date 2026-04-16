@@ -167,7 +167,8 @@ class DeliveryAgent(CellAgent):
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
         requester_trust = self.calculate_trust(requester.unique_id)
 
-        if requester_trust > 0.7 or self.random.random() < min(0.5, requester_trust):
+        # if requester_trust > 0.7 or self.random.random() < min(0.5, requester_trust):
+        if requester_trust >= 0.4 or self.random.random() < requester_trust:
             if target in self.known_drop_offs:
                 return self.known_drop_offs[target]
 
