@@ -237,7 +237,7 @@ class DeliveryAgent(CellAgent):
         if self.goal_name in self.known_drop_offs.keys() and self.state != "DELIVERING":
             self.target_coordinate = self.known_drop_offs[self.goal_name]
             self.state = "DELIVERING"
-        elif self.state is None or (self.state == "EXPLORING" and self.target_coordinate in self.internal_map):
+        elif self.state == "IDLE" or (self.state == "EXPLORING" and self.target_coordinate in self.internal_map):
             responses = self.model.request_map_data(self, self.goal_name)
             success = False
 
