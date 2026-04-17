@@ -26,6 +26,7 @@ class DeliveryAgent(CellAgent):
         self.package = None
         self.current_provider_id = None
         self.delivery_count = 0
+        self._all_possible_coords_cache = set((x, y) for x in range(model.grid.width) for y in range(model.grid.height))
 
     @property
     def global_rep(self) -> float:
@@ -216,10 +217,10 @@ class DeliveryAgent(CellAgent):
         :return: None or coordinate
         """
 
-        all_possible_coordinates = set((x,y) for x in range(self.model.grid.width) for y in range(self.model.grid.height))
+        # all_possible_coordinates = set((x,y) for x in range(self.model.grid.width) for y in range(self.model.grid.height))
         explored_coordinates = set(self.internal_map.keys())
 
-        unexplored_coordinates = all_possible_coordinates - explored_coordinates
+        unexplored_coordinates = self._all_possible_coords_cache - explored_coordinates
 
         if unexplored_coordinates:
             return self.random.choice(list(unexplored_coordinates))
