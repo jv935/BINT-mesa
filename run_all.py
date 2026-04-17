@@ -3,7 +3,7 @@ import os
 import sys
 
 TOTAL_ITERATIONS = 100
-CHUNK_SIZE = 10
+CHUNK_SIZE = 5
 CSV_FILE = "bint_batch_results.csv"
 
 if __name__ == "__main__":
