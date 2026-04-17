@@ -37,15 +37,27 @@ if __name__ == "__main__":
     write_header = not os.path.exists(csv_filename)
 
     if results:
-        keys = results[0].keys()
-        
-        with open(csv_filename, "a", newline="") as output_file:
-            dict_writer = csv.DictWriter(output_file, fieldnames=keys)
-            
+        keys = list(results[0].keys())
+
+        # buffering=10485760 gives the OS a 10MB buffer
+        with open(csv_filename, "a", newline="", buffering=10485760) as output_file:
+            writer = csv.writer(output_file)
+
             if write_header:
-                dict_writer.writeheader()
-            
-            dict_writer.writerows(results)
+                writer.writerow(keys)
+
+            writer.writerows(row.values() for row in results)
+
+    # if results:
+    #     keys = results[0].keys()
+    #
+    #     with open(csv_filename, "a", newline="") as output_file:
+    #         dict_writer = csv.DictWriter(output_file, fieldnames=keys)
+    #
+    #         if write_header:
+    #             dict_writer.writeheader()
+    #
+    #         dict_writer.writerows(results)
 
     # results_df.to_csv(csv_filename, mode="a", index=False, header=write_header)
     print(f"Success!")
