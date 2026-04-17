@@ -54,6 +54,10 @@ class BintWorldModel(mesa.Model):
         # MaliciousMapDeliveryAgent.create_agents(self, self.num_agents, self.agent_spawn_cells[num_agents:], self.agent_vision_radius)
         # DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
 
+        # cache the agent lists since they never die or spawn mid-simulation
+        self.cached_drop_offs = self.agents.select(agent_type=DropOffLocationAgent).to_list()
+        self.cached_delivery_agents = self.agents.select(agent_type=DeliveryAgent).to_list()
+
         self.distribute_initial_knowledge()
         self.dispatch_packages()
         self.seed_genesis_tnfts()
@@ -126,7 +130,7 @@ class BintWorldModel(mesa.Model):
     def request_map_data(self, requester: DeliveryAgent, target_name: str) -> list:
         responses = []
 
-        for agent in self.agents.select(agent_type=DeliveryAgent):
+        for agent in self.cached_delivery_agents:
             if agent == requester:
                 continue
 
@@ -181,12 +185,11 @@ class BintWorldModel(mesa.Model):
         """
 
         # get the names of each drop off location
-        all_drop_offs = [d for d in self.agents.select(agent_type=DropOffLocationAgent)]
 
-        for agent in self.agents.select(agent_type=DeliveryAgent):
+        for agent in self.cached_delivery_agents:
             if agent.goal_name is None:
                 # do not use previous drop off again
-                possible_destinations = [d for d in all_drop_offs if d.unique_id != agent.prev_goal_name]
+                possible_destinations = [d for d in self.cached_drop_offs if d.unique_id != agent.prev_goal_name]
 
                 if possible_destinations:
                     new_destination = self.random.choice(possible_destinations)
