@@ -15,18 +15,18 @@ class DeliveryAgent(CellAgent):
 
         super().__init__(model)
         self.cell = cell
-        self.internal_map = {}
-        self.known_drop_offs = {}
+        self.internal_map: dict[tuple[int, int], dict] = {}
+        self.known_drop_offs: dict[str, tuple[int, int]] = {}
         self.goal_name = None
         self.prev_goal_name = None
         self.state = "IDLE"
         self.target_coordinate = None
         self.vision_radius = vision_radius
-        self.points = 0
+        self.points = 0.0
         self.package = None
         self.current_provider_id = None
         self.delivery_count = 0
-        self._all_possible_coords_cache = set((x, y) for x in range(model.grid.width) for y in range(model.grid.height))
+        self._all_possible_coords = model.all_coordinates
 
         self.cached_active_tnfts = 0
         self.cached_burned_tnfts = 0
