@@ -125,6 +125,9 @@ class BintWorldModel(mesa.Model):
 
 
     def seed_genesis_tnfts(self) -> None:
+        if not self.cached_delivery_agents:
+            return
+
         for agent in self.cached_delivery_agents:
             for _ in range(2):
                 self.mint_tnft(
@@ -134,7 +137,7 @@ class BintWorldModel(mesa.Model):
                 )
 
 
-    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str) -> None:
+    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str) -> int:
         self.nft_counter += 1
 
         tnft = {
@@ -149,31 +152,35 @@ class BintWorldModel(mesa.Model):
 
         # update cache
         target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == receiver_id), None)
-        target_agent.cached_active_tnfts += 1
+        if target_agent is not None:
+            target_agent.cached_active_tnfts += 1
+
+        return tnft["id"]
 
 
     def query_vtp(self, agent_id: str) -> int:
         # TODO: This should give the tnfts instead of the count, currently kept like this for simplicity
         target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == agent_id), None)
-        return target_agent.cached_active_tnfts
+        return 0 if target_agent is None else target_agent.cached_active_tnfts
 
 
     def burn_tnft(self, burner_id: str, target_id: str) -> bool:
         active_tnfts = [t for t in self.tnft_ledger if t["owner"] == target_id and t["status"] is True]
 
-        if active_tnfts:
-            tnft_to_burn = active_tnfts[0]
-            tnft_to_burn["status"] = False
-            tnft_to_burn["burned_by"] = burner_id
-            tnft_to_burn["burn_timestamp"] = self.time
+        if not active_tnfts:
+            return False
 
-            target_agent = next((a for a in self.cached_delivery_agents if a.unique_id is target_id), None)
-            target_agent.cached_active_tnfts -= 1
-            target_agent.cached_burned_tnfts +=1
+        tnft_to_burn = active_tnfts[0]
+        tnft_to_burn["status"] = False
+        tnft_to_burn["burned_by"] = burner_id
+        tnft_to_burn["burn_timestamp"] = self.time
 
-            return  True
+        target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == target_id), None)
+        if target_agent is not None:
+            target_agent.cached_active_tnfts = max(0, target_agent.cached_active_tnfts - 1)
+            target_agent.cached_burned_tnfts += 1
 
-        return  False
+        return  True
 
 
     def calc_global_trust(self, agent_id: str) -> float:
@@ -222,20 +229,19 @@ class BintWorldModel(mesa.Model):
         Makes sure each delivery agent knows at least one drop-off location before giving a second coordinate.
         If there are less drop-offs than agents then some agents will not start with any initial knowledge.
         """
+        if not self.cached_delivery_agents or not self.cached_drop_offs:
+            return
 
-        drop_offs = self.agents.select(agent_type=DropOffLocationAgent).to_list()
-        delivery_agents = self.agents.select(agent_type=DeliveryAgent).to_list()
-
+        delivery_agents = list(self.cached_delivery_agents)
         self.random.shuffle(delivery_agents)
 
-        for i, drop_off in enumerate(drop_offs):
-            receiving_agent = delivery_agents[i % self.total_delivery_agents]
-
+        for i, drop_off in enumerate(self.cached_drop_offs):
+            receiving_agent = delivery_agents[i % len(delivery_agents)]
             receiving_agent.update_internal_map(
                 coordinate=drop_off.cell.coordinate,
                 env_type="drop_off",
                 info_source="system",
-                drop_off_name=drop_off.unique_id
+                drop_off_name=drop_off.unique_id,
             )
 
 
@@ -244,28 +250,30 @@ class BintWorldModel(mesa.Model):
         Randomly assign new delivery goals for each agent.
         Will not assign the same goal as lsat time.
         """
+        if not self.cached_delivery_agents or not self.cached_drop_offs:
+            return
 
         # get the names of each drop off location
 
         for agent in self.cached_delivery_agents:
-            if agent.goal_name is None:
-                # do not use previous drop off again
-                possible_destinations = [d for d in self.cached_drop_offs if d.unique_id != agent.prev_goal_name]
+            if agent.goal_name is not None:
+                continue
 
-                if possible_destinations:
-                    new_destination = self.random.choice(possible_destinations)
-                    min_steps_to_destination = self.chebyshev_distance(agent.cell.coordinate, new_destination.cell.coordinate)
-                    max_steps_to_destination = int(min_steps_to_destination * (self.random.betavariate(5, 5) + 1) + 1)
+            possible_destinations = [d for d in self.cached_drop_offs if d.unique_id != agent.prev_goal_name]
+            if not possible_destinations:
+                continue
 
-                    package = {
-                        "destination": new_destination.unique_id,
-                        "max_steps": max_steps_to_destination,
-                        "min_steps": min_steps_to_destination,
-                        "steps_taken": 0,
-                    }
+            new_destination = self.random.choice(possible_destinations)
+            min_steps_to_destination = self.chebyshev_distance(agent.cell.coordinate, new_destination.cell.coordinate)
+            max_steps_to_destination = int(min_steps_to_destination * (self.random.betavariate(5, 5) + 1) + 1)
 
-                    agent.receive_package(package)
-                    #self.packages_to_be_delivered[agent.unique_id] = package
+            package = {
+                "destination": new_destination.unique_id,
+                "max_steps": max_steps_to_destination,
+                "min_steps": min_steps_to_destination,
+                "steps_taken": 0,
+            }
+            agent.receive_package(package)
 
 
     def verify_delivery(self, agent: DeliveryAgent, package: dict):
