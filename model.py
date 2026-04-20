@@ -220,18 +220,26 @@ class BintWorldModel(mesa.Model):
 
 
     def query_vtp(self, agent_id: str) -> int:
-        # TODO: This should give the tnfts instead of the count, currently kept like this for simplicity
-        target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == agent_id), None)
-        return 0 if target_agent is None else target_agent.cached_active_tnfts
+        """
+        Keeping it for backwards compatibility.
+        """
+        return self.get_vtp_summary(agent_id)["total_active"]
 
 
-    def burn_tnft(self, burner_id: str, target_id: str) -> bool:
-        active_tnfts = [t for t in self.tnft_ledger if t["owner"] == target_id and t["status"] is True]
+    def burn_tnft(self, burner_id: str, target_id: str, service_type: str|None = None) -> bool:
+        active_tnfts = [t for t in self.tnft_ledger if t["owner"] == target_id and t["status"]]
+
+        if service_type is not None:
+            service_specific = [t for t in active_tnfts if t["service_type"] == service_type]
+            if service_specific:
+                active_tnfts = service_specific
 
         if not active_tnfts:
             return False
 
+        active_tnfts.sort(key=lambda t: (t["type"] == "bootstrap", t["id"]))
         tnft_to_burn = active_tnfts[0]
+
         tnft_to_burn["status"] = False
         tnft_to_burn["burned_by"] = burner_id
         tnft_to_burn["burn_timestamp"] = self.time
