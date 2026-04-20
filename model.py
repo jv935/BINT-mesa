@@ -10,7 +10,18 @@ def get_ledger_size(model):
     return len(model.tnft_ledger)
 
 class BintWorldModel(mesa.Model):
-    def __init__(self, num_drop_offs: int=5, agent_counts: dict=None, num_delivery: int=5, num_map_malicious: int=2, size: tuple[int] = (50, 50), agent_vision_radius: int=2, rng: int|str=None) -> None:
+    def __init__(
+            self,
+            num_drop_offs: int=5,
+            agent_counts: dict=None,
+            num_delivery: int=5,
+            num_map_malicious: int=2,
+            size: tuple[int, int]=None,
+            width: int=100,
+            height: int=100,
+            agent_vision_radius: int=2,
+            rng: int|str=None
+    ) -> None:
         """
         A model for the implementation of BINT.
 
@@ -23,6 +34,8 @@ class BintWorldModel(mesa.Model):
 
         super().__init__(rng=(int(rng) if rng else None))
 
+        self.size = size if size is not None else (width, height)
+
         if agent_counts is None:
             agent_counts = {
                 DeliveryAgent:num_delivery,
@@ -34,12 +47,13 @@ class BintWorldModel(mesa.Model):
         self.agent_vision_radius = agent_vision_radius
         self.total_delivery_agents = sum(self.agent_counts.values())
 
-        self.grid = OrthogonalMooreGrid(size, torus=False, random=self.random)
+        self.grid = OrthogonalMooreGrid(self.size, torus=False, random=self.random)
 
         self.drop_off_cells = self.random.sample(self.grid.all_cells.cells, k=self.num_drop_offs)
         self.agent_spawn_cells = self.random.sample(self.grid.all_cells.cells, k=self.total_delivery_agents)
 
         self.tnft_ledger = []
+        self.nft_counter = 0
 
         spawn_idx = 0
         for AgentClass, count in agent_counts.items():
@@ -67,9 +81,7 @@ class BintWorldModel(mesa.Model):
             "State": "state",
             "Points": "points",
             "Deliveries": "delivery_count",
-            "Global Trust": "global_rep",
-            "Positive TNFTs": "positive_tnfts",
-            "Negative TNFTs": "negative_tnfts",
+            "Active TNFTs": "cached_active_tnfts",
             "Map Size": "map_size",
             "Known Drop-Offs": "known_drop_offs_count",
             "Steps on Package": "steps_on_package"
@@ -89,14 +101,55 @@ class BintWorldModel(mesa.Model):
 
 
     def seed_genesis_tnfts(self) -> None:
-        for agent in self.agents.select(agent_type=DeliveryAgent):
+        for agent in self.cached_delivery_agents:
             for _ in range(2):
                 self.mint_tnft(
                     issuer_id="SYSTEM",
                     receiver_id=agent.unique_id,
                     interaction_type="genesis",
-                    is_positive=True
                 )
+
+
+    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str) -> None:
+        self.nft_counter += 1
+
+        tnft = {
+            "id": self.nft_counter,
+            "issuer": issuer_id,
+            "owner": receiver_id,
+            "type": interaction_type,
+            "status": True, # True means active, False means burned
+            "timestamp": self.time
+        }
+        self.tnft_ledger.append(tnft)
+
+        # update cache
+        target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == receiver_id), None)
+        target_agent.cached_active_tnfts += 1
+
+
+    def query_vtp(self, agent_id: str) -> int:
+        # TODO: This should give the tnfts instead of the count, currently kept like this for simplicity
+        target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == agent_id), None)
+        return target_agent.cached_active_tnfts
+
+
+    def burn_tnft(self, burner_id: str, target_id: str) -> bool:
+        active_tnfts = [t for t in self.tnft_ledger if t["owner"] == target_id and t["status"] is True]
+
+        if active_tnfts:
+            tnft_to_burn = active_tnfts[0]
+            tnft_to_burn["status"] = False
+            tnft_to_burn["burned_by"] = burner_id
+            tnft_to_burn["burn_timestamp"] = self.time
+
+            target_agent = next((a for a in self.cached_delivery_agents if a.unique_id is target_id), None)
+            target_agent.cached_active_tnfts -= 1
+            target_agent.cached_burned_tnfts +=1
+
+            return  True
+
+        return  False
 
 
     def calc_global_trust(self, agent_id: str) -> float:
@@ -109,22 +162,6 @@ class BintWorldModel(mesa.Model):
         total_count = max(5, len(agent_tnfts))
 
         return float(pos_tnfts/total_count)
-
-
-    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str, is_positive: bool) -> None:
-        tnft = {
-            "issuer": issuer_id,
-            "receiver": receiver_id,
-            "type": interaction_type,
-            "positive": is_positive,
-            "timestamp": self.time
-        }
-        self.tnft_ledger.append(tnft)
-        # else:
-        #     agent_tnfts = [nft for nft in self.tnft_ledger if nft["receiver"] == receiver_id]
-        #
-        #     if agent_tnfts:
-        #         self.random.choice(agent_tnfts)["receiver"] = "null"
 
 
     def request_map_data(self, requester: DeliveryAgent, target_name: str) -> list:
