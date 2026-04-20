@@ -1,5 +1,7 @@
 import mesa
 from mesa.discrete_space import OrthogonalMooreGrid
+from solara.template.portal.solara_portal.data import metadata
+
 from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 
 
@@ -77,6 +79,8 @@ class BintWorldModel(mesa.Model):
 
         self.tnft_ledger: list[dict] = []
         self.nft_counter = 0
+        self.interaction_counter = 0
+        self.interaction_log = dict[str, dict] = {}
 
         spawn_idx = 0
         for AgentClass, count in self.agent_counts.items():
@@ -122,6 +126,22 @@ class BintWorldModel(mesa.Model):
         )
 
         self.datacollector.collect(self)
+
+
+    def create_interaction(self, truster_id: str, trustee_id: str, service_type: str, metadata: dict|None = None) -> str:
+        self.interaction_counter += 1
+        interaction_id = f"interaction_{self.interaction_counter}"
+
+        self.interaction_log[interaction_id] = {
+            "interaction_id": interaction_id,
+            "truster": truster_id,
+            "trustee": trustee_id,
+            "service_type": service_type,
+            "metadata": metadata,
+            "timestamp": self.time,
+        }
+
+        return interaction_id
 
 
     def seed_genesis_tnfts(self) -> None:
