@@ -7,7 +7,7 @@ from mesa import batch_run
 from model import BintWorldModel
 
 params = {
-    "size": [(100, 100)],
+    "size": [(150, 150)],
     "num_drop_offs": [5, 10, 15],
     "agent_vision_radius": [2],
     "num_delivery": [7, 10],
@@ -26,7 +26,7 @@ if __name__ == "__main__":
         parameters=params,
         rng=rng_values.tolist(),
         max_steps=1000,
-        number_processes=None,
+        number_processes=3,
         data_collection_period=1,
         display_progress=True
     )
