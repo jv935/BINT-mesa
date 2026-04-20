@@ -32,9 +32,17 @@ class BintWorldModel(mesa.Model):
         :param rng: Random generation seed.
         """
 
-        super().__init__(rng=(int(rng) if rng else None))
+        super().__init__(rng=(int(rng) if rng is not None and rng != "" else None))
 
         self.size = size if size is not None else (width, height)
+        self.width, self.height = self.size
+
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Grid width and height must both be > 0.")
+        if num_drop_offs < 1:
+            raise ValueError("num_drop_offs must be at least 1.")
+        if agent_vision_radius < 0:
+            raise ValueError("agent_vision_radius must be >= 0.")
 
         if agent_counts is None:
             agent_counts = {
@@ -42,25 +50,41 @@ class BintWorldModel(mesa.Model):
                 MaliciousMapDeliveryAgent: num_map_malicious,
             }
 
-        self.agent_counts = agent_counts
-        self.num_drop_offs = num_drop_offs
-        self.agent_vision_radius = agent_vision_radius
+        self.agent_counts = {cls: int(count) for cls, count in agent_counts.items()}
+        if any(count < 0 for count in self.agent_counts.values()):
+            raise ValueError("Agent counts cannot be negative.")
+
+        self.num_drop_offs = int(num_drop_offs)
+        self.agent_vision_radius = int(agent_vision_radius)
         self.total_delivery_agents = sum(self.agent_counts.values())
+
+        total_cells = self.width * self.height
+        required_distinct_cells = self.num_drop_offs + self.total_delivery_agents
+        if required_distinct_cells > total_cells:
+            raise ValueError(
+                f"Configuration needs {required_distinct_cells} distinct cells, "
+                f"but grid only has {total_cells}."
+            )
 
         self.grid = OrthogonalMooreGrid(self.size, torus=False, random=self.random)
 
-        self.drop_off_cells = self.random.sample(self.grid.all_cells.cells, k=self.num_drop_offs)
-        self.agent_spawn_cells = self.random.sample(self.grid.all_cells.cells, k=self.total_delivery_agents)
+        all_cells = list(self.grid.all_cells.cells)
+        selected_cells = self.random.sample(all_cells, k=required_distinct_cells)
 
-        self.tnft_ledger = []
+        self.drop_off_cells = selected_cells[: self.num_drop_offs]
+        self.agent_spawn_cells = selected_cells[self.num_drop_offs :]
+        self.all_coordinates = frozenset(cell.coordinate for cell in all_cells)
+
+        self.tnft_ledger: list[dict] = []
         self.nft_counter = 0
 
         spawn_idx = 0
-        for AgentClass, count in agent_counts.items():
-            if count > 0:
-                cells_for_current_class = self.agent_spawn_cells[spawn_idx:spawn_idx+count]
-                AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius)
-                spawn_idx += count
+        for AgentClass, count in self.agent_counts.items():
+            if count <= 0:
+                continue
+            cells_for_current_class = self.agent_spawn_cells[spawn_idx : spawn_idx + count]
+            AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius)
+            spawn_idx += count
 
         DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
 
@@ -69,8 +93,8 @@ class BintWorldModel(mesa.Model):
         # DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
 
         # cache the agent lists since they never die or spawn mid-simulation
-        self.cached_drop_offs = self.agents.select(agent_type=DropOffLocationAgent).to_list()
-        self.cached_delivery_agents = self.agents.select(agent_type=DeliveryAgent).to_list()
+        self.cached_drop_offs = [a for a in self.agents if isinstance(a, DropOffLocationAgent)]
+        self.cached_delivery_agents = [a for a in self.agents if isinstance(a, DeliveryAgent)]
 
         self.distribute_initial_knowledge()
         self.dispatch_packages()
