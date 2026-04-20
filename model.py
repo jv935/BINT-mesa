@@ -1,3 +1,5 @@
+from ensurepip import bootstrap
+
 import mesa
 from mesa.discrete_space import OrthogonalMooreGrid
 from solara.template.portal.solara_portal.data import metadata
@@ -182,6 +184,39 @@ class BintWorldModel(mesa.Model):
             target_agent.cached_active_tnfts += 1
 
         return tnft["id"]
+
+
+    def get_vtp(self, agent_id: str,service_type: str|None = None, active_only: bool = True) -> list[dict]:
+        nfts = [t for t in self.tnft_ledger if t["owner"] == agent_id]
+
+        if active_only:
+            nfts = [nft for nft in nfts if nft["status"]]
+
+        if service_type is not None:
+            nfts = [nft for nft in nfts if nft["service_type"] == service_type]
+
+        nfts.sort(key=lambda t: t["timestamp"], reverse=True)
+        return nfts
+
+
+    def get_vtp_summary(self, agent_id: str, service_type: str|None=None) -> dict:
+        nfts = self.get_vtp(agent_id, service_type=service_type, active_only=True)
+
+        earned_nfts = [nft for nft in nfts if nft["type"] != "bootstrap"]
+        bootstrap_nfts = [nft for nft in nfts if nft["type"] == "bootstrap"]
+
+        # simple scoring for now
+        score = (1.0 * len(earned_nfts)) + (0.25 * len(bootstrap_nfts))
+
+        return {
+            "agent_id": agent_id,
+            "service_type": service_type,
+            "total_active": len(nfts),
+            "earned_active": len(earned_nfts),
+            "bootstrap_active": len(bootstrap_nfts),
+            "score": score,
+            "tnfts": nfts,
+        }
 
 
     def query_vtp(self, agent_id: str) -> int:
