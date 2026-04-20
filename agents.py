@@ -65,11 +65,13 @@ class DeliveryAgent(CellAgent):
     #         return blended_trust
 
 
-    def move(self) -> None:
+    def move(self) -> bool:
         """
         Move towards the internal target coordinate.
         Can move 1 cell in one of 8 directions at a time.
         """
+        if self.target_coordinate is None:
+            return False
 
         current_x, current_y = self.cell.coordinate
         target_x, target_y = self.target_coordinate
@@ -86,7 +88,8 @@ class DeliveryAgent(CellAgent):
         elif current_y > target_y:
             dy = -1
 
-        if dx != 0 or dy != 0:
+        moved = dx != 0 or dy != 0
+        if moved:
             self.move_relative((dx, dy))
 
         # could maybe check if the agent is on cell from the get-go?
@@ -94,6 +97,7 @@ class DeliveryAgent(CellAgent):
 
         if self.cell.coordinate == self.target_coordinate:
             agents_on_cell = [a.unique_id for a in self.cell.agents]
+
             # if the delivery location is here
             if self.state == "DELIVERING":
                 if self.goal_name in agents_on_cell:
@@ -130,8 +134,10 @@ class DeliveryAgent(CellAgent):
             self.target_coordinate = None
             self.current_provider_id = None
 
+        return moved
 
-    def update_internal_map(self, coordinate: tuple[int], env_type: str, info_source: str="self", drop_off_name: str|None=None) -> None:
+
+    def update_internal_map(self, coordinate: tuple[int, int], env_type: str, info_source: str="self", drop_off_name: str|None=None) -> None:
         """
         Updates the internal map of the agent.
 
@@ -160,9 +166,8 @@ class DeliveryAgent(CellAgent):
 
 
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
-        if self.verify_vtp(requester.unique_id):
-            if target in self.known_drop_offs:
-                return self.known_drop_offs[target]
+        if self.verify_vtp(requester.unique_id) and target in self.known_drop_offs:
+            return self.known_drop_offs[target]
 
         return None
 
@@ -178,15 +183,15 @@ class DeliveryAgent(CellAgent):
         ).cells
 
         for cell in visible_area:
-            if cell.is_empty:
-                self.update_internal_map(cell.coordinate, "floor")
+            drop_off = next(
+                (agent for agent in cell.agents if isinstance(agent, DropOffLocationAgent)),
+                None
+            )
 
-            for agent in cell.agents:
-                if isinstance(agent, DropOffLocationAgent):
-                    self.update_internal_map(cell.coordinate, "drop_off", drop_off_name=agent.unique_id)
-                    break
-                else:
-                    self.update_internal_map(cell.coordinate, "floor")
+            if drop_off is not None:
+                self.update_internal_map(cell.coordinate, "drop_off", drop_off_name=drop_off.unique_id)
+            else:
+                self.update_internal_map(cell.coordinate, "floor")
 
 
     def receive_package(self, package: dict) -> None:
@@ -210,27 +215,24 @@ class DeliveryAgent(CellAgent):
 
         # all_possible_coordinates = set((x,y) for x in range(self.model.grid.width) for y in range(self.model.grid.height))
         explored_coordinates = set(self.internal_map.keys())
+        unexplored_coordinates = tuple(self._all_possible_coords - explored_coordinates)
 
-        unexplored_coordinates = self._all_possible_coords_cache - explored_coordinates
-
-        if unexplored_coordinates:
-            return self.random.choice(list(unexplored_coordinates))
-        else:
+        if not unexplored_coordinates:
             return None
+        return self.random.choice(unexplored_coordinates)
 
 
     def step(self) -> None:
         self.perceive_env()
 
-        if self.goal_name is None:
+        if self.goal_name is None or self.package is None:
             return
 
-        self.package["steps_taken"] += 1
-
-        if self.goal_name in self.known_drop_offs.keys() and self.state != "DELIVERING":
+        if self.goal_name in self.known_drop_offs and self.state != "DELIVERING":
             self.target_coordinate = self.known_drop_offs[self.goal_name]
             self.state = "DELIVERING"
-        elif self.state == "IDLE" or (self.state == "EXPLORING" and self.target_coordinate in self.internal_map):
+
+        elif self.state == "IDLE" or (self.state == "EXPLORING" and (self.target_coordinate is None or self.target_coordinate in self.internal_map)):
             responses = self.model.request_map_data(self, self.goal_name)
             success = False
 
@@ -250,11 +252,12 @@ class DeliveryAgent(CellAgent):
                 self.state = "DELIVERING"
             else:
                 self.target_coordinate = self.select_unexplored_coordinate()
-                self.state = "EXPLORING"
+                self.state = "EXPLORING" if self.target_coordinate is not None else "IDLE"
 
-        if self.target_coordinate:
-            self.move()
-
+        if self.target_coordinate is not None:
+            moved = self.move()
+            if moved and self.package is not None:
+                self.package["steps_taken"] += 1
 
 
 class DropOffLocationAgent(FixedAgent):
