@@ -28,9 +28,9 @@ class DeliveryAgent(CellAgent):
         self.delivery_count = 0
         self._all_possible_coords_cache = set((x, y) for x in range(model.grid.width) for y in range(model.grid.height))
 
-    @property
-    def global_rep(self) -> float:
-        return self.model.calc_global_trust(self.unique_id)
+        self.cached_active_tnfts = 0
+        self.cached_burned_tnfts = 0
+
 
     @property
     def map_size(self) -> int:
@@ -44,28 +44,25 @@ class DeliveryAgent(CellAgent):
     def steps_on_package(self) -> int:
         return self.package["steps_taken"] if self.package else 0
 
-    @property
-    def positive_tnfts(self) -> int:
-        return sum(1 for nft in self.model.tnft_ledger if nft["receiver"] == self.unique_id and nft["positive"])
 
-    @property
-    def negative_tnfts(self) -> int:
-        return sum(1 for nft in self.model.tnft_ledger if nft["receiver"] == self.unique_id and not nft["positive"])
+    def verify_vtp(self, target_id: str) -> bool:
+        # TODO: Smarter logic for trust
+        return self.model.query_vtp(target_id) >= 1
 
 
-    def calculate_trust(self, target_agent_id: str) -> float:
-        global_rep = self.model.calc_global_trust(target_agent_id)
-        all_target_tnfts = [nft for nft in self.model.tnft_ledger if nft["receiver"] == target_agent_id]
-        direct_experiences = [nft for nft in all_target_tnfts if nft["issuer"] == self.unique_id]
-
-        if not direct_experiences:
-            return global_rep
-        else:
-            pos_direct = sum(1 for nft in direct_experiences if nft["positive"])
-            local_trust = float(pos_direct/max(3, len(direct_experiences)))
-
-            blended_trust = (0.7 * local_trust) + (0.3 * global_rep)
-            return blended_trust
+    # def calculate_trust(self, target_agent_id: str) -> float:
+    #     global_rep = self.model.calc_global_trust(target_agent_id)
+    #     all_target_tnfts = [nft for nft in self.model.tnft_ledger if nft["receiver"] == target_agent_id]
+    #     direct_experiences = [nft for nft in all_target_tnfts if nft["issuer"] == self.unique_id]
+    #
+    #     if not direct_experiences:
+    #         return global_rep
+    #     else:
+    #         pos_direct = sum(1 for nft in direct_experiences if nft["positive"])
+    #         local_trust = float(pos_direct/max(3, len(direct_experiences)))
+    #
+    #         blended_trust = (0.7 * local_trust) + (0.3 * global_rep)
+    #         return blended_trust
 
 
     def move(self) -> None:
@@ -110,7 +107,6 @@ class DeliveryAgent(CellAgent):
                                 issuer_id=self.unique_id,
                                 receiver_id=self.current_provider_id,
                                 interaction_type="map_data",
-                                is_positive=True
                             )
 
                         self.prev_goal_name = self.goal_name
@@ -119,11 +115,9 @@ class DeliveryAgent(CellAgent):
 
                 else:
                     if self.current_provider_id is not None:
-                        self.model.mint_tnft(
-                            issuer_id=self.unique_id,
-                            receiver_id=self.current_provider_id,
-                            interaction_type="map_data",
-                            is_positive=False
+                        self.model.burn_tnft(
+                            burner_id=self.unique_id,
+                            target_id=self.current_provider_id
                         )
 
                     if self.goal_name in self.known_drop_offs:
@@ -166,10 +160,7 @@ class DeliveryAgent(CellAgent):
 
 
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
-        requester_trust = self.calculate_trust(requester.unique_id)
-
-        # if requester_trust > 0.7 or self.random.random() < min(0.5, requester_trust):
-        if requester_trust >= 0.4 or self.random.random() < requester_trust:
+        if self.verify_vtp(requester.unique_id):
             if target in self.known_drop_offs:
                 return self.known_drop_offs[target]
 
@@ -246,9 +237,7 @@ class DeliveryAgent(CellAgent):
             for response in responses:
                 provider_id = response["agent"]
 
-                provider_trust = self.calculate_trust(provider_id)
-
-                if provider_trust > 0.7 or self.random.random() < min(0.5, provider_trust):
+                if self.verify_vtp(provider_id):
                     self.update_internal_map(response["coord"], "drop_off", response["agent"], self.goal_name)
 
                     if self.goal_name in self.known_drop_offs:
@@ -287,15 +276,15 @@ class DropOffLocationAgent(FixedAgent):
 
 
 class MaliciousMapDeliveryAgent(DeliveryAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: float=1.0) -> None:
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: float=0.5) -> None:
         super().__init__(model, cell, vision_radius)
         self.maliciousness = maliciousness
 
     @override
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
         # if self.model.calc_global_trust(self.unique_id) >= 0.5 and self.random.random() <= self.maliciousness:
-        if self.random.random() <= self.maliciousness:
-            return self.random.randint(0, self.model.grid.width-1), self.random.randint(0, self.model.grid.height-1)
-        
+        if self.verify_vtp(requester.unique_id):
+            if self.random.random() <= self.maliciousness:
+                return self.random.randint(0, self.model.grid.width-1), self.random.randint(0, self.model.grid.height-1)
 
         return super().share_map(requester, target)
