@@ -14,7 +14,7 @@ if __name__ == "__main__":
     total_chunks = (TOTAL_ITERATIONS + CHUNK_SIZE - 1) // CHUNK_SIZE
     chunk_num = 1
 
-    print(f"--- Starting sweep: {TOTAL_ITERATIONS} iterations ---")
+    print(f"--- Starting sweep: {TOTAL_ITERATIONS} seed replications per parameter combination ---")
 
     for start in range(0, TOTAL_ITERATIONS, CHUNK_SIZE):
         current_chunk = min(CHUNK_SIZE, TOTAL_ITERATIONS-start)

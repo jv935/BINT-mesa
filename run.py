@@ -1,7 +1,6 @@
 import sys
 import os
 import csv
-import pandas as pd
 import numpy as np
 from mesa import batch_run
 from model import BintWorldModel
@@ -19,7 +18,7 @@ if __name__ == "__main__":
     csv_filename = sys.argv[2] if len(sys.argv) > 2 else "results.csv"
 
     rng = np.random.default_rng()
-    rng_values = rng.integers(0, sys.maxsize, size=(chunk_size,))
+    rng_values = rng.integers(0, sys.maxsize, size=chunk_size)
 
     results = batch_run(
         model_cls=BintWorldModel,
@@ -32,32 +31,15 @@ if __name__ == "__main__":
     )
 
     print("Complete! Saving to CSV...")
-    # results_df = pd.DataFrame(results)
-
-    write_header = not os.path.exists(csv_filename)
 
     if results:
         keys = list(results[0].keys())
+        write_header = not os.path.exists(csv_filename)
 
-        # buffering=10485760 gives the OS a 10MB buffer
-        with open(csv_filename, "a", newline="", buffering=10485760) as output_file:
-            writer = csv.writer(output_file)
-
+        with open(csv_filename, "a", newline="", buffering=10_485_760) as output_file:
+            writer = csv.DictWriter(output_file, fieldnames=keys)
             if write_header:
-                writer.writerow(keys)
+                writer.writeheader()
+            writer.writerows(results)
 
-            writer.writerows(row.values() for row in results)
-
-    # if results:
-    #     keys = results[0].keys()
-    #
-    #     with open(csv_filename, "a", newline="") as output_file:
-    #         dict_writer = csv.DictWriter(output_file, fieldnames=keys)
-    #
-    #         if write_header:
-    #             dict_writer.writeheader()
-    #
-    #         dict_writer.writerows(results)
-
-    # results_df.to_csv(csv_filename, mode="a", index=False, header=write_header)
-    print(f"Success!")
+    print(f"Success! Wrote {len(results)} rows to {csv_filename}")
