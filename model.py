@@ -128,7 +128,7 @@ class BintWorldModel(mesa.Model):
         self.datacollector.collect(self)
 
 
-    def create_interaction(self, truster_id: str, trustee_id: str, service_type: str, metadata: dict|None = None) -> str:
+    def create_interaction(self, truster_id: str, trustee_id: str, service_type: str, meta: dict|None = None) -> str:
         self.interaction_counter += 1
         interaction_id = f"interaction_{self.interaction_counter}"
 
@@ -137,7 +137,7 @@ class BintWorldModel(mesa.Model):
             "truster": truster_id,
             "trustee": trustee_id,
             "service_type": service_type,
-            "metadata": metadata,
+            "metadata": meta,
             "timestamp": self.time,
         }
 
@@ -153,11 +153,14 @@ class BintWorldModel(mesa.Model):
                 self.mint_tnft(
                     issuer_id="SYSTEM",
                     receiver_id=agent.unique_id,
-                    interaction_type="genesis",
+                    interaction_type="bootstrap",
+                    service_type="map_data",
+                    interaction_id=None,
+                    meta={"bootstrap": True},
                 )
 
 
-    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str) -> int:
+    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str, service_type: str, interaction_id: str|None, meta: dict|None=None) -> int:
         self.nft_counter += 1
 
         tnft = {
@@ -165,6 +168,9 @@ class BintWorldModel(mesa.Model):
             "issuer": issuer_id,
             "owner": receiver_id,
             "type": interaction_type,
+            "service_type": service_type,
+            "interaction_id": interaction_id,
+            "metadata": meta or {},
             "status": True, # True means active, False means burned
             "timestamp": self.time
         }
