@@ -14,21 +14,21 @@ def get_ledger_size(model):
 
 @dataclass
 class InteractionRecord:
-    interaction_id: str,
-    truster_id: str,
-    trustee_id: str,
-    service_type: str,
+    interaction_id: str
+    truster_id: str
+    trustee_id: str
+    service_type: str
     meta: dict = field(default_factory=dict)
-    timestamp: int = 0
+    timestamp: float = 0.0
     status: Literal["pending", "completed", "cancelled"] = "pending"
 
 
 @dataclass
-class OutcomeRecord
-    interaction_id: str,
-    status: Literal["success", "failure"],
+class OutcomeRecord:
+    interaction_id: str
+    status: Literal["success", "failure"]
     meta: dict = field(default_factory=dict)
-    timestamp: int = 0
+    timestamp: float = 0.0
 
 
 class BintWorldModel(mesa.Model):
@@ -100,7 +100,8 @@ class BintWorldModel(mesa.Model):
         self.tnft_ledger: list[dict] = []
         self.nft_counter = 0
         self.interaction_counter = 0
-        self.interaction_log = dict[str, dict] = {}
+        self.interactions: dict[str, InteractionRecord] = {}
+        self.outcomes: dict[str, OutcomeRecord] = {}
 
         spawn_idx = 0
         for AgentClass, count in self.agent_counts.items():
@@ -148,20 +149,78 @@ class BintWorldModel(mesa.Model):
         self.datacollector.collect(self)
 
 
-    def create_interaction(self, truster_id: str, trustee_id: str, service_type: str, meta: dict|None = None) -> str:
+    def record_interaction(self, truster_id: str, trustee_id: str, service_type: str, meta: dict|None = None) -> str:
         self.interaction_counter += 1
         interaction_id = f"interaction_{self.interaction_counter}"
 
-        self.interaction_log[interaction_id] = {
-            "interaction_id": interaction_id,
-            "truster": truster_id,
-            "trustee": trustee_id,
-            "service_type": service_type,
-            "metadata": meta,
-            "timestamp": self.time,
-        }
+        record = InteractionRecord(
+            interaction_id=interaction_id,
+            truster_id=truster_id,
+            trustee_id=trustee_id,
+            service_type=service_type,
+            meta=meta or {},
+            timestamp=self.time,
+            status="pending",
+        )
 
+        self.interactions[interaction_id] = record
         return interaction_id
+
+
+    def get_interaction(self, interaction_id: str) -> InteractionRecord|None:
+        return self.interactions.get(interaction_id)
+
+
+    def record_outcome(self, interaction_id: str, status: Literal["success", "failure"], meta: dict|None = None) -> OutcomeRecord|None:
+        if interaction_id not in self.interactions:
+            return None
+
+        outcome = OutcomeRecord(
+            interaction_id=interaction_id,
+            status=status,
+            meta=meta or {},
+            timestamp=self.time,
+        )
+
+        self.outcomes[interaction_id] = outcome
+        return  outcome
+
+
+    def settle_interaction(self, interaction_id: str, evaluator_id: str, outcome_status: Literal["success", "failure"], outcome_meta: dict|None = None) -> OutcomeRecord|None:
+        interaction = self.get_interaction(interaction_id)
+
+        if interaction is None or interaction.status != "pending":
+            return None
+
+        outcome = self.record_outcome(
+            interaction_id=interaction_id,
+            status=outcome_status,
+            meta=outcome_meta or {},
+        )
+
+        if outcome["status"] == "success":
+            self.mint_tnft(
+                issuer_id=evaluator_id,
+                receiver_id=interaction.trustee_id,
+                interaction_type="reward",
+                service_type=interaction.service_type,
+                interaction_id=interaction_id,
+                meta={
+                    "interaction_metadata": dict(interaction.meta),
+                    "outcome_metadata": dict(outcome.meta),
+                },
+            )
+            interaction.status = "completed"
+
+        elif outcome["status"] == "failure":
+            self.burn_tnft(
+                burner_id=evaluator_id,
+                target_id=interaction.trustee_id,
+                service_type=interaction.service_type,
+            )
+            interaction.status = "completed"
+
+        return outcome
 
 
     def seed_genesis_tnfts(self) -> None:
@@ -205,35 +264,35 @@ class BintWorldModel(mesa.Model):
 
 
     def get_vtp(self, agent_id: str,service_type: str|None = None, active_only: bool = True) -> list[dict]:
-        nfts = [t for t in self.tnft_ledger if t["owner"] == agent_id]
+        tnfts = [t for t in self.tnft_ledger if t["owner"] == agent_id]
 
         if active_only:
-            nfts = [nft for nft in nfts if nft["status"]]
+            tnfts = [nft for nft in tnfts if nft["status"]]
 
         if service_type is not None:
-            nfts = [nft for nft in nfts if nft["service_type"] == service_type]
+            tnfts = [nft for nft in tnfts if nft["service_type"] == service_type]
 
-        nfts.sort(key=lambda t: t["timestamp"], reverse=True)
-        return nfts
+        tnfts.sort(key=lambda t: t["timestamp"], reverse=True)
+        return tnfts
 
 
     def get_vtp_summary(self, agent_id: str, service_type: str|None=None) -> dict:
-        nfts = self.get_vtp(agent_id, service_type=service_type, active_only=True)
+        tnfts = self.get_vtp(agent_id, service_type=service_type, active_only=True)
 
-        earned_nfts = [nft for nft in nfts if nft["type"] != "bootstrap"]
-        bootstrap_nfts = [nft for nft in nfts if nft["type"] == "bootstrap"]
+        earned_tnfts = [t for t in tnfts if t["type"] != "bootstrap"]
+        bootstrap_tnfts = [t for t in tnfts if t["type"] == "bootstrap"]
 
         # simple scoring for now
-        score = (1.0 * len(earned_nfts)) + (0.25 * len(bootstrap_nfts))
+        score = (1.0 * len(earned_tnfts)) + (0.25 * len(bootstrap_tnfts))
 
         return {
             "agent_id": agent_id,
             "service_type": service_type,
-            "total_active": len(nfts),
-            "earned_active": len(earned_nfts),
-            "bootstrap_active": len(bootstrap_nfts),
+            "total_active": len(tnfts),
+            "earned_active": len(earned_tnfts),
+            "bootstrap_active": len(bootstrap_tnfts),
             "score": score,
-            "tnfts": nfts,
+            "tnfts": tnfts,
         }
 
 
