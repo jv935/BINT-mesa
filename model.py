@@ -1,9 +1,7 @@
-from ensurepip import bootstrap
-
 import mesa
 from mesa.discrete_space import OrthogonalMooreGrid
-from solara.template.portal.solara_portal.data import metadata
-
+from dataclasses import dataclass, field, asdict
+from typing import Literal
 from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 
 
@@ -12,6 +10,26 @@ def get_agent_type(agent):
 
 def get_ledger_size(model):
     return len(model.tnft_ledger)
+
+
+@dataclass
+class InteractionRecord:
+    interaction_id: str,
+    truster_id: str,
+    trustee_id: str,
+    service_type: str,
+    meta: dict = field(default_factory=dict)
+    timestamp: int = 0
+    status: Literal["pending", "completed", "cancelled"] = "pending"
+
+
+@dataclass
+class OutcomeRecord
+    interaction_id: str,
+    status: Literal["success", "failure"],
+    meta: dict = field(default_factory=dict)
+    timestamp: int = 0
+
 
 class BintWorldModel(mesa.Model):
     def __init__(
