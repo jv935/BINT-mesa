@@ -107,14 +107,12 @@ class DeliveryAgent(CellAgent):
                     if success:
                         self.delivery_count += 1
 
-                        if self.current_provider_id is not None:
-                            self.model.mint_tnft(
-                                issuer_id=self.unique_id,
-                                receiver_id=self.current_provider_id,
-                                interaction_type="reward",
-                                service_type="map_data",
+                        if self.current_interaction_id is not None:
+                            self.model.settle_interaction(
                                 interaction_id=self.current_interaction_id,
-                                meta={"goal_name": self.goal_name}
+                                evaluator_id=self.unique_id,
+                                outcome_status="success",
+                                outcome_meta={"goal_name": self.goal_name}
                             )
 
                         self.prev_goal_name = self.goal_name
@@ -122,11 +120,12 @@ class DeliveryAgent(CellAgent):
                         self.package = None
 
                 else:
-                    if self.current_provider_id is not None:
-                        self.model.burn_tnft(
-                            burner_id=self.unique_id,
-                            target_id=self.current_provider_id,
-                            service_type="map_data"
+                    if self.current_interaction_id is not None:
+                        self.model.settle_interaction(
+                            interaction_id=self.current_interaction_id,
+                            evaluator_id=self.unique_id,
+                            outcome_status="failure",
+                            outcome_meta={"goal_name": self.goal_name},
                         )
 
                     if self.goal_name in self.known_drop_offs:
@@ -250,11 +249,11 @@ class DeliveryAgent(CellAgent):
 
                     if self.goal_name in self.known_drop_offs:
                         self.current_provider_id = provider_id
-                        self.current_interaction_id = self.model.create_interaction(
+                        self.current_interaction_id = self.model.record_interaction(
                             truster_id=self.unique_id,
                             trustee_id=provider_id,
                             service_type="map_data",
-                            meta={"goal_name": self.goal_name},
+                            meta={"goal_name": self.goal_name, "shared_coordinate": response["coord"]},
                         )
                         success = True
                         break

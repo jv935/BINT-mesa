@@ -183,8 +183,7 @@ class BintWorldModel(mesa.Model):
         )
 
         self.outcomes[interaction_id] = outcome
-        return  outcome
-
+        return outcome
 
     def settle_interaction(self, interaction_id: str, evaluator_id: str, outcome_status: Literal["success", "failure"], outcome_meta: dict|None = None) -> OutcomeRecord|None:
         interaction = self.get_interaction(interaction_id)
@@ -197,8 +196,10 @@ class BintWorldModel(mesa.Model):
             status=outcome_status,
             meta=outcome_meta or {},
         )
+        if outcome is None:
+            return None
 
-        if outcome["status"] == "success":
+        if outcome.status == "success":
             self.mint_tnft(
                 issuer_id=evaluator_id,
                 receiver_id=interaction.trustee_id,
@@ -212,13 +213,16 @@ class BintWorldModel(mesa.Model):
             )
             interaction.status = "completed"
 
-        elif outcome["status"] == "failure":
-            self.burn_tnft(
+        elif outcome.status == "failure":
+            burned = self.burn_tnft(
                 burner_id=evaluator_id,
                 target_id=interaction.trustee_id,
                 service_type=interaction.service_type,
             )
-            interaction.status = "completed"
+            interaction.status = "completed" if burned else "cancelled"
+
+        else:  # disputed
+            interaction.status = "cancelled"
 
         return outcome
 
@@ -307,14 +311,12 @@ class BintWorldModel(mesa.Model):
         active_tnfts = [t for t in self.tnft_ledger if t["owner"] == target_id and t["status"]]
 
         if service_type is not None:
-            service_specific = [t for t in active_tnfts if t["service_type"] == service_type]
-            if service_specific:
-                active_tnfts = service_specific
+            active_tnfts = [t for t in active_tnfts if t["service_type"] == service_type]
 
         if not active_tnfts:
             return False
 
-        active_tnfts.sort(key=lambda t: (t["type"] == "bootstrap", t["id"]))
+        active_tnfts.sort(key=lambda t: (t["type"] != "bootstrap", t["id"]))
         tnft_to_burn = active_tnfts[0]
 
         tnft_to_burn["status"] = False
