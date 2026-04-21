@@ -27,7 +27,7 @@ class DeliveryAgent(CellAgent):
         self.current_provider_id = None
         self.delivery_count = 0
         self._all_possible_coords = model.all_coordinates
-
+        self.current_interaction_id = None
         self.cached_active_tnfts = 0
         self.cached_burned_tnfts = 0
 
@@ -45,9 +45,10 @@ class DeliveryAgent(CellAgent):
         return self.package["steps_taken"] if self.package else 0
 
 
-    def verify_vtp(self, target_id: str) -> bool:
-        # TODO: Smarter logic for trust
-        return self.model.query_vtp(target_id) >= 1
+    def verify_vtp(self, target_id: str, service_type: str="map_data") -> bool:
+        summary = self.model.get_vtp_summary(target_id, service_type)
+        return summary["score"] >= 0.5
+
 
 
     # def calculate_trust(self, target_agent_id: str) -> float:
@@ -110,7 +111,10 @@ class DeliveryAgent(CellAgent):
                             self.model.mint_tnft(
                                 issuer_id=self.unique_id,
                                 receiver_id=self.current_provider_id,
-                                interaction_type="map_data",
+                                interaction_type="reward",
+                                service_type="map_data",
+                                interaction_id=self.current_interaction_id,
+                                meta={"goal_name": self.goal_name}
                             )
 
                         self.prev_goal_name = self.goal_name
@@ -121,7 +125,8 @@ class DeliveryAgent(CellAgent):
                     if self.current_provider_id is not None:
                         self.model.burn_tnft(
                             burner_id=self.unique_id,
-                            target_id=self.current_provider_id
+                            target_id=self.current_provider_id,
+                            service_type="map_data"
                         )
 
                     if self.goal_name in self.known_drop_offs:
@@ -133,6 +138,7 @@ class DeliveryAgent(CellAgent):
             self.state = "IDLE"
             self.target_coordinate = None
             self.current_provider_id = None
+            self.current_interaction_id = None
 
         return moved
 
@@ -244,6 +250,12 @@ class DeliveryAgent(CellAgent):
 
                     if self.goal_name in self.known_drop_offs:
                         self.current_provider_id = provider_id
+                        self.current_interaction_id = self.model.create_interaction(
+                            truster_id=self.unique_id,
+                            trustee_id=provider_id,
+                            service_type="map_data",
+                            meta={"goal_name": self.goal_name},
+                        )
                         success = True
                         break
 
