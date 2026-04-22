@@ -42,7 +42,11 @@ class BintWorldModel(mesa.Model):
             width: int=100,
             height: int=100,
             agent_vision_radius: int=2,
-            rng: int|str=None
+            bootstrap_tnfts_per_agent: int=0,
+            trust_threshold: float=0.5,
+            trust_mode: str="bint", # bint or none
+            maliciousness: float=0.5,
+            rng: int|str=None,
     ) -> None:
         """
         A model for the implementation of BINT.
@@ -58,7 +62,19 @@ class BintWorldModel(mesa.Model):
 
         self.size = size if size is not None else (width, height)
         self.width, self.height = self.size
+        self.bootstrap_tnfts_per_agent = bootstrap_tnfts_per_agent
+        self.trust_threshold = trust_threshold
+        self.trust_mode = trust_mode
+        self.maliciousness = maliciousness
 
+        if self.bootstrap_tnfts_per_agent < 0:
+            raise ValueError("bootstrap_tnfts_per_agent must be >= 0.")
+        if not (0.0 <= self.trust_threshold):
+            raise ValueError("trust_threshold must be >= 0.")
+        if self.trust_mode not in {"bint", "none"}:
+            raise ValueError("trust_mode must be 'bint' or 'none'.")
+        if not (0.0 <= self.maliciousness <= 1.0):
+            raise ValueError("maliciousness must be between 0 and 1.")
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Grid width and height must both be > 0.")
         if num_drop_offs < 1:
