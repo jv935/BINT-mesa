@@ -46,8 +46,11 @@ class DeliveryAgent(CellAgent):
 
 
     def verify_vtp(self, target_id: str, service_type: str="map_data") -> bool:
+        if self.model.trust_mode == "none":
+            return True
+
         summary = self.model.get_vtp_summary(target_id, service_type)
-        return summary["score"] >= 0.5
+        return summary["score"] >= self.model.trust_threshold
 
 
 
