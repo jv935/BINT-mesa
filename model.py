@@ -137,10 +137,6 @@ class BintWorldModel(mesa.Model):
         self.cached_drop_offs = [a for a in self.agents if isinstance(a, DropOffLocationAgent)]
         self.cached_delivery_agents = [a for a in self.agents if isinstance(a, DeliveryAgent)]
 
-        for agent in self.cached_delivery_agents:
-            if isinstance(agent, MaliciousMapDeliveryAgent):
-                agent.maliciousness = self.maliciousness
-
         self.distribute_initial_knowledge()
         self.dispatch_packages()
         self.seed_genesis_tnfts()
@@ -248,11 +244,11 @@ class BintWorldModel(mesa.Model):
 
 
     def seed_genesis_tnfts(self) -> None:
-        if not self.cached_delivery_agents or self.bootstrap_tnfts_per_agent <= 0:
+        if not self.cached_delivery_agents:
             return
 
         for agent in self.cached_delivery_agents:
-            for _ in range(self.bootstrap_tnfts_per_agent):
+            for _ in range(2):
                 self.mint_tnft(
                     issuer_id="SYSTEM",
                     receiver_id=agent.unique_id,
@@ -349,6 +345,18 @@ class BintWorldModel(mesa.Model):
             target_agent.cached_burned_tnfts += 1
 
         return  True
+
+
+    def calc_global_trust(self, agent_id: str) -> float:
+        agent_tnfts = [nft for nft in self.tnft_ledger if nft["receiver"] == agent_id]
+
+        if not agent_tnfts:
+            return 0.0
+
+        pos_tnfts = sum(1 for nft in agent_tnfts if nft["positive"])
+        total_count = max(5, len(agent_tnfts))
+
+        return float(pos_tnfts/total_count)
 
 
     def request_map_data(self, requester: DeliveryAgent, target_name: str) -> list:
