@@ -4,7 +4,7 @@ from typing_extensions import override
 
 
 class DeliveryAgent(CellAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int) -> None:
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, trust_threshold: float=1.0) -> None:
         """
         An agent that delivers packages to drop-off locations. Can share map data with other agents.
 
@@ -22,6 +22,7 @@ class DeliveryAgent(CellAgent):
         self.state = "IDLE"
         self.target_coordinate = None
         self.vision_radius = vision_radius
+        self.trust_threshold = trust_threshold
         self.points = 0.0
         self.package = None
         self.current_provider_id = None
@@ -50,7 +51,7 @@ class DeliveryAgent(CellAgent):
             return True
 
         summary = self.model.get_vtp_summary(target_id, service_type)
-        return summary["score"] >= self.model.trust_threshold
+        return summary["score"] >= self.trust_threshold
 
 
 
@@ -293,8 +294,8 @@ class DropOffLocationAgent(FixedAgent):
 
 
 class MaliciousMapDeliveryAgent(DeliveryAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, maliciousness: float=0.5) -> None:
-        super().__init__(model, cell, vision_radius)
+    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, trust_threshold: float=1.0, maliciousness: float=0.5) -> None:
+        super().__init__(model, cell, vision_radius, trust_threshold)
         self.maliciousness = maliciousness
 
     @override

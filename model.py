@@ -42,6 +42,9 @@ class BintWorldModel(mesa.Model):
             width: int=100,
             height: int=100,
             agent_vision_radius: int=2,
+            trust_threshold: float=1.0,
+            genesis_tokens: int=1,
+            maliciousness_prob: float=0.5,
             rng: int|str=None
     ) -> None:
         """
@@ -79,6 +82,9 @@ class BintWorldModel(mesa.Model):
         self.num_drop_offs = int(num_drop_offs)
         self.agent_vision_radius = int(agent_vision_radius)
         self.total_delivery_agents = sum(self.agent_counts.values())
+        self.trust_threshold = float(trust_threshold)
+        self.genesis_tokens = int(genesis_tokens)
+        self.maliciousness_prob = maliciousness_prob
 
         total_cells = self.width * self.height
         required_distinct_cells = self.num_drop_offs + self.total_delivery_agents
@@ -108,7 +114,12 @@ class BintWorldModel(mesa.Model):
             if count <= 0:
                 continue
             cells_for_current_class = self.agent_spawn_cells[spawn_idx : spawn_idx + count]
-            AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius)
+
+            if AgentClass == MaliciousMapDeliveryAgent:
+                AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius, self.trust_threshold, self.maliciousness_prob)
+            else:
+                AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius, self.trust_threshold)
+
             spawn_idx += count
 
         DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
@@ -232,7 +243,7 @@ class BintWorldModel(mesa.Model):
             return
 
         for agent in self.cached_delivery_agents:
-            for _ in range(2):
+            for _ in range(self.genesis_tokens):
                 self.mint_tnft(
                     issuer_id="SYSTEM",
                     receiver_id=agent.unique_id,
