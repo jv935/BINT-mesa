@@ -3,7 +3,9 @@ from mesa.discrete_space import OrthogonalMooreGrid
 from dataclasses import dataclass, field, asdict
 from typing import Literal
 from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
-
+import os
+import json
+import uuid
 
 def get_agent_type(agent):
     return type(agent).__name__
@@ -45,6 +47,7 @@ class BintWorldModel(mesa.Model):
             trust_threshold: float=1.0,
             genesis_tokens: int=1,
             maliciousness_prob: float=0.5,
+            max_steps: int=1000,
             rng: int|str=None
     ) -> None:
         """
@@ -57,10 +60,16 @@ class BintWorldModel(mesa.Model):
         :param rng: Random generation seed.
         """
 
-        super().__init__(rng=(int(rng) if rng is not None and rng != "" else None))
+        if rng is not None and rng != "":
+            self.rng_seed = int(rng)
+        else:
+            self.rng_seed = None
+
+        super().__init__(rng=self.rng_seed)
 
         self.size = size if size is not None else (width, height)
         self.width, self.height = self.size
+        self.max_steps = max_steps
 
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Grid width and height must both be > 0.")
@@ -477,3 +486,44 @@ class BintWorldModel(mesa.Model):
         self.agents.shuffle_do("step")
         self.dispatch_packages()
         self.datacollector.collect(self)
+
+        if self.steps == self.max_steps:
+            self.export_end_of_run_data()
+
+
+    def export_end_of_run_data(self) -> None:
+        export_dir = "exports"
+        os.makedirs(export_dir, exist_ok=True)
+        run_uuid = uuid.uuid4().hex[:8]
+
+        export_payload = {
+            "run_id": run_uuid,
+            "rng_seed": self.rng_seed,
+            "total_steps": self.steps,
+
+            "drop_offs": [
+                {
+                    "id": d.unique_id,
+                    "coord": d.cell.coordinate,
+                } for d in self.cached_drop_offs
+            ],
+
+            "agent_snapshots": [
+                {
+                    "agent_id": a.unique_id,
+                    "agent_type": type(a).__name__,
+                    "final_points": a.points,
+                    "total_deliveries": a.delivery_count,
+                    "active_tnfts": a.cached_active_tnfts,
+                    "burned_tnfts": a.cached_burned_tnfts,
+                } for a in self.cached_delivery_agents
+            ],
+
+            "interactions": [asdict(record) for record in self.interactions.values()],
+            "outcomes": [asdict(record) for record in self.outcomes.values()],
+            "tnft_ledger": self.tnft_ledger,
+        }
+
+        filename = os.path.join(export_dir, f"run_{self.rng_seed}_{run_uuid}.json")
+        with open(filename, "w") as f:
+            json.dump(export_payload, f, indent=4)
