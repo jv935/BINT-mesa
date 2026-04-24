@@ -47,27 +47,34 @@ class DeliveryAgent(CellAgent):
 
 
     def verify_vtp(self, target_id: str, service_type: str="map_data") -> bool:
-        if self.model.trust_mode == "none":
-            return True
-
         summary = self.model.get_vtp_summary(target_id, service_type)
         return summary["score"] >= self.trust_threshold
 
+    def build_outcome_meta(self) -> dict:
+        if self.package is None:
+            return {
+                "goal_name": self.goal_name,
+                "steps_taken": None,
+                "min_steps": None,
+                "max_steps": None,
+                "extra_steps": None,
+                "target_coordinate": self.target_coordinate,
+                "ended_on_coordinate": self.cell.coordinate,
+            }
 
+        steps_taken = self.package["steps_taken"]
+        min_steps = self.package["min_steps"]
+        max_steps = self.package["max_steps"]
 
-    # def calculate_trust(self, target_agent_id: str) -> float:
-    #     global_rep = self.model.calc_global_trust(target_agent_id)
-    #     all_target_tnfts = [nft for nft in self.model.tnft_ledger if nft["receiver"] == target_agent_id]
-    #     direct_experiences = [nft for nft in all_target_tnfts if nft["issuer"] == self.unique_id]
-    #
-    #     if not direct_experiences:
-    #         return global_rep
-    #     else:
-    #         pos_direct = sum(1 for nft in direct_experiences if nft["positive"])
-    #         local_trust = float(pos_direct/max(3, len(direct_experiences)))
-    #
-    #         blended_trust = (0.7 * local_trust) + (0.3 * global_rep)
-    #         return blended_trust
+        return {
+            "goal_name": self.goal_name,
+            "steps_taken": steps_taken,
+            "min_steps": min_steps,
+            "max_steps": max_steps,
+            "extra_steps": max(0, steps_taken - min_steps),
+            "target_coordinate": self.target_coordinate,
+            "ended_on_coordinate": self.cell.coordinate,
+        }
 
 
     def move(self) -> bool:
@@ -106,17 +113,21 @@ class DeliveryAgent(CellAgent):
             # if the delivery location is here
             if self.state == "DELIVERING":
                 if self.goal_name in agents_on_cell:
+                    previous_points = self.points
                     success = self.model.verify_delivery(self, self.package)
 
                     if success:
                         self.delivery_count += 1
 
                         if self.current_interaction_id is not None:
+                            outcome_meta = self.build_outcome_meta()
+                            outcome_meta["points_delta"] = self.points - previous_points
+
                             self.model.settle_interaction(
                                 interaction_id=self.current_interaction_id,
                                 evaluator_id=self.unique_id,
                                 outcome_status="success",
-                                outcome_meta={"goal_name": self.goal_name}
+                                outcome_meta=outcome_meta
                             )
 
                         self.prev_goal_name = self.goal_name
@@ -125,11 +136,14 @@ class DeliveryAgent(CellAgent):
 
                 else:
                     if self.current_interaction_id is not None:
+                        outcome_meta = self.build_outcome_meta()
+                        outcome_meta["points_delta"] = 0.0
+
                         self.model.settle_interaction(
                             interaction_id=self.current_interaction_id,
                             evaluator_id=self.unique_id,
                             outcome_status="failure",
-                            outcome_meta={"goal_name": self.goal_name},
+                            outcome_meta=outcome_meta
                         )
 
                     if self.goal_name in self.known_drop_offs:
