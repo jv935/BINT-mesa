@@ -18,7 +18,7 @@ EXPORT_DIR = "exports"
 
 BASE_DELIVERY_POINTS = 10.0
 GRACE_WINDOW_RATIO = 0.3
-LATE_PENALTY_PER_STEP = 0.5
+LATE_PENALTY_PER_STEP = 1.0
 
 
 def get_agent_type(agent: CellAgent) -> str:
@@ -79,7 +79,7 @@ class BintWorldModel(mesa.Model):
         self.agent_vision_radius = int(agent_vision_radius)
         self.trust_threshold = float(trust_threshold)
         self.genesis_tokens = int(genesis_tokens)
-        self.maliciousness_prob = maliciousness_prob
+        self.maliciousness_prob = float(maliciousness_prob)
 
         self.agent_counts = self._normalise_agent_counts(
             agent_counts=agent_counts,
@@ -284,7 +284,7 @@ class BintWorldModel(mesa.Model):
         interaction.status = "cancelled"
 
 
-    def _reward_successful_interaction(self, interaction: InteractionRecord, outcome: OutcomeRecord|None, evaluator_id: str) -> None:
+    def _reward_successful_interaction(self, interaction: InteractionRecord, outcome: OutcomeRecord, evaluator_id: str) -> None:
         self.mint_tnft(
             issuer_id=evaluator_id,
             receiver_id=interaction.trustee_id,
