@@ -1,16 +1,31 @@
 import mesa
-from mesa.discrete_space import OrthogonalMooreGrid
+from mesa.discrete_space import OrthogonalMooreGrid, CellAgent
 from dataclasses import dataclass, field, asdict
-from typing import Literal
+from typing import Literal, Any
 from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 import os
 import json
 import uuid
 
-def get_agent_type(agent):
+
+Coordinate = tuple[int, int]
+InteractionStatus = Literal["pending", "completed", "cancelled"]
+OutcomeStatus = Literal["success", "failure", "disputed"]
+
+MAP_DATA_SERVICE = "map_data"
+SYSTEM_ISSUER_ID = "SYSTEM"
+EXPORT_DIR = "exports"
+
+BASE_DELIVERY_POINTS = 10.0
+GRACE_WINDOW_RATIO = 0.3
+LATE_PENALTY_PER_STEP = 0.5
+
+
+def get_agent_type(agent: CellAgent) -> str:
     return type(agent).__name__
 
-def get_ledger_size(model):
+
+def get_ledger_size(model: mesa.Model) -> int:
     return len(model.tnft_ledger)
 
 
@@ -20,160 +35,186 @@ class InteractionRecord:
     truster_id: str
     trustee_id: str
     service_type: str
-    meta: dict = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
     timestamp: float = 0.0
-    status: Literal["pending", "completed", "cancelled"] = "pending"
+    status: InteractionStatus = "pending"
 
 
 @dataclass
 class OutcomeRecord:
     interaction_id: str
-    status: Literal["success", "failure"]
-    meta: dict = field(default_factory=dict)
+    status: OutcomeStatus
+    meta: dict[str, Any] = field(default_factory=dict)
     timestamp: float = 0.0
 
 
 class BintWorldModel(mesa.Model):
+    """Mesa simulation for BINT."""
+
     def __init__(
             self,
             num_drop_offs: int=5,
-            agent_counts: dict=None,
+            agent_counts: dict[type,int]|None=None,
             num_delivery: int=5,
             num_map_malicious: int=2,
-            size: tuple[int, int]=None,
+            size: Coordinate|None=None,
             width: int=100,
             height: int=100,
             agent_vision_radius: int=2,
-            trust_threshold: float=1.0,
-            genesis_tokens: int=1,
+            trust_threshold: float=0.5,
+            genesis_tokens: int=2,
             maliciousness_prob: float=0.5,
             max_steps: int=1000,
-            rng: int|str=None
+            rng: int|str|None=None
     ) -> None:
-        """
-        A model for the implementation of BINT.
 
-        :param agent_counts: A dictionary storing the type of agent along with the amount.
-        :param size: The width and height of the grid.
-        :param num_drop_offs: The number of drop-off locations.
-        :param agent_vision_radius: The vision radius of the delivery agents.
-        :param rng: Random generation seed.
-        """
-
-        if rng is not None and rng != "":
-            self.rng_seed = int(rng)
-        else:
-            self.rng_seed = None
-
+        self.rng_seed = self._normalise_rng_seed(rng)
         super().__init__(rng=self.rng_seed)
 
         self.size = size if size is not None else (width, height)
         self.width, self.height = self.size
-        self.max_steps = max_steps
-
-        if self.width <= 0 or self.height <= 0:
-            raise ValueError("Grid width and height must both be > 0.")
-        if num_drop_offs < 1:
-            raise ValueError("num_drop_offs must be at least 1.")
-        if agent_vision_radius < 0:
-            raise ValueError("agent_vision_radius must be >= 0.")
-
-        if agent_counts is None:
-            agent_counts = {
-                DeliveryAgent:num_delivery,
-                MaliciousMapDeliveryAgent: num_map_malicious,
-            }
-
-        self.agent_counts = {cls: int(count) for cls, count in agent_counts.items()}
-        if any(count < 0 for count in self.agent_counts.values()):
-            raise ValueError("Agent counts cannot be negative.")
+        self.max_steps = int(max_steps)
 
         self.num_drop_offs = int(num_drop_offs)
         self.agent_vision_radius = int(agent_vision_radius)
-        self.total_delivery_agents = sum(self.agent_counts.values())
         self.trust_threshold = float(trust_threshold)
         self.genesis_tokens = int(genesis_tokens)
         self.maliciousness_prob = maliciousness_prob
 
-        total_cells = self.width * self.height
-        required_distinct_cells = self.num_drop_offs + self.total_delivery_agents
-        if required_distinct_cells > total_cells:
-            raise ValueError(
-                f"Configuration needs {required_distinct_cells} distinct cells, "
-                f"but grid only has {total_cells}."
-            )
+        self.agent_counts = self._normalise_agent_counts(
+            agent_counts=agent_counts,
+            num_delivery=num_delivery,
+            num_map_malicious=num_map_malicious,
+        )
+        self.total_delivery_agents = sum(self.agent_counts.values())
 
-        self.grid = OrthogonalMooreGrid(self.size, torus=False, random=self.random)
-
-        all_cells = list(self.grid.all_cells.cells)
-        selected_cells = self.random.sample(all_cells, k=required_distinct_cells)
-
-        self.drop_off_cells = selected_cells[: self.num_drop_offs]
-        self.agent_spawn_cells = selected_cells[self.num_drop_offs :]
-        self.all_coordinates = frozenset(cell.coordinate for cell in all_cells)
-
-        self.tnft_ledger: list[dict] = []
-        self.nft_counter = 0
-        self.interaction_counter = 0
-        self.interactions: dict[str, InteractionRecord] = {}
-        self.outcomes: dict[str, OutcomeRecord] = {}
-
-        spawn_idx = 0
-        for AgentClass, count in self.agent_counts.items():
-            if count <= 0:
-                continue
-            cells_for_current_class = self.agent_spawn_cells[spawn_idx : spawn_idx + count]
-
-            if AgentClass == MaliciousMapDeliveryAgent:
-                AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius, self.trust_threshold, self.maliciousness_prob)
-            else:
-                AgentClass.create_agents(self, count, cells_for_current_class, self.agent_vision_radius, self.trust_threshold)
-
-            spawn_idx += count
-
-        DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
-
-        # DeliveryAgent.create_agents(self, self.num_agents, self.agent_spawn_cells[:num_agents], self.agent_vision_radius)
-        # MaliciousMapDeliveryAgent.create_agents(self, self.num_agents, self.agent_spawn_cells[num_agents:], self.agent_vision_radius)
-        # DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
-
-        # cache the agent lists since they never die or spawn mid-simulation
-        self.cached_drop_offs = [a for a in self.agents if isinstance(a, DropOffLocationAgent)]
-        self.cached_delivery_agents = [a for a in self.agents if isinstance(a, DeliveryAgent)]
+        self._validate_configuration()
+        self._create_grid()
+        self._initialise_ledger_and_records()
+        self._spawn_agents()
+        self._cache_agents()
 
         self.distribute_initial_knowledge()
         self.dispatch_packages()
         self.seed_genesis_tnfts()
 
+        self._initialise_data_collection()
+
+
+    @staticmethod
+    def _normalise_rng_seed(rng: int|str|None) -> int|None:
+        if rng is None or rng == "":
+            return None
+        return int(rng)
+
+
+    @staticmethod
+    def _normalise_agent_counts(
+            agent_counts: dict[type, int] | None,
+            num_delivery: int,
+            num_map_malicious: int,
+    ) -> dict[type, int]:
+        if agent_counts is None:
+            agent_counts = {
+                DeliveryAgent: num_delivery,
+                MaliciousMapDeliveryAgent: num_map_malicious,
+            }
+
+        return {agent_class: int(count) for agent_class, count in agent_counts.items()}
+
+
+    def _validate_configuration(self) -> None:
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Grid width and height must be positive.")
+        if self.num_drop_offs < 1:
+            raise ValueError("num_drop_offs must be >= 1.")
+        if self.agent_vision_radius < 0:
+            raise ValueError("agent_vision_radius must be >= 0.")
+        if any(count < 0 for count in self.agent_counts.values()):
+            raise ValueError("Agent counts must be non-negative.")
+
+        total_cells = self.width * self.height
+        required_cells = self.num_drop_offs + self.total_delivery_agents
+
+        if required_cells > total_cells:
+            raise ValueError(
+                f"Configuration needs {required_cells} distinct cells, but grid only has {total_cells}."
+            )
+
+
+    def _create_grid(self) -> None:
+        self.grid = OrthogonalMooreGrid(self.size, torus=False, random=self.random)
+
+        all_cells = list(self.grid.all_cells.cells)
+        required_cells = self.num_drop_offs + self.total_delivery_agents
+        selected_cells = self.random.sample(all_cells, k=required_cells)
+
+        self.drop_off_cells = selected_cells[:self.num_drop_offs]
+        self.agent_spawn_cells = selected_cells[self.num_drop_offs:]
+        self.all_coordinates = frozenset(cell.coordinate for cell in all_cells)
+
+
+    def _initialise_ledger_and_records(self) -> None:
+        self.tnft_ledger: list[dict[str, Any]] = []
+        self.nft_counter = 0
+        self.interaction_counter = 0
+        self.interactions: dict[str, InteractionRecord] = {}
+        self.outcomes: dict[str,OutcomeRecord] = {}
+
+
+    def _spawn_agents(self) -> None:
+        spawn_index = 0
+
+        for agent_class,count in self.agent_counts.items():
+            if count <= 0:
+                continue
+
+            cells = self.agent_spawn_cells[spawn_index : spawn_index + count]
+            common_args = [self, count, cells, self.agent_vision_radius, self.trust_threshold]
+
+            if agent_class is MaliciousMapDeliveryAgent:
+                agent_class.create_agents(*common_args, self.maliciousness_prob)
+            else:
+                agent_class.create_agents(*common_args)
+
+            spawn_index += count
+
+        DropOffLocationAgent.create_agents(self, self.num_drop_offs, self.drop_off_cells)
+
+
+    def _cache_agents(self) -> None:
+        self.cached_drop_offs = [agent for agent in self.agents if isinstance(agent, DropOffLocationAgent)]
+        self.cached_delivery_agents = [agent for agent in self.agents if isinstance(agent, DeliveryAgent)]
+
+
+    def _initialise_data_collection(self) -> None:
         tracking_parameters = {
-            "Agent Type": get_agent_type,
-            "State": "state",
-            "Points": "points",
-            "Deliveries": "delivery_count",
-            "Active TNFTs": "cached_active_tnfts",
-            "Map Size": "map_size",
-            "Known Drop-Offs": "known_drop_offs_count",
-            "Steps on Package": "steps_on_package"
+            "agent_type": get_agent_type,
+            "state": "state",
+            "points": "points",
+            "delivery_count": "delivery_count",
+            "active_tnfts": "cached_active_tnfts",
+            "known_drop_offs": "known_drop_offs_count",
+            "steps_on_package": "steps_on_package",
         }
 
         self.datacollector = mesa.DataCollector(
             model_reporters={
-                "Ledger Size": get_ledger_size,
+                "ledger_size": get_ledger_size,
             },
             agenttype_reporters={
                 DeliveryAgent: tracking_parameters,
-                MaliciousMapDeliveryAgent: tracking_parameters
+                MaliciousMapDeliveryAgent: tracking_parameters,
             }
         )
-
         self.datacollector.collect(self)
 
 
-    def record_interaction(self, truster_id: str, trustee_id: str, service_type: str, meta: dict|None = None) -> str:
+    def record_interaction(self, truster_id: str, trustee_id: str, service_type: str, meta: dict[str,Any]|None = None) -> str:
         self.interaction_counter += 1
         interaction_id = f"interaction_{self.interaction_counter}"
 
-        record = InteractionRecord(
+        self.interactions[interaction_id] = InteractionRecord(
             interaction_id=interaction_id,
             truster_id=truster_id,
             trustee_id=trustee_id,
@@ -182,8 +223,6 @@ class BintWorldModel(mesa.Model):
             timestamp=self.time,
             status="pending",
         )
-
-        self.interactions[interaction_id] = record
         return interaction_id
 
 
@@ -191,7 +230,7 @@ class BintWorldModel(mesa.Model):
         return self.interactions.get(interaction_id)
 
 
-    def record_outcome(self, interaction_id: str, status: Literal["success", "failure"], meta: dict|None = None) -> OutcomeRecord|None:
+    def record_outcome(self, interaction_id: str, status: OutcomeStatus, meta: dict[str, Any]|None = None) -> OutcomeRecord|None:
         if interaction_id not in self.interactions:
             return None
 
@@ -205,7 +244,7 @@ class BintWorldModel(mesa.Model):
         self.outcomes[interaction_id] = outcome
         return outcome
 
-    def settle_interaction(self, interaction_id: str, evaluator_id: str, outcome_status: Literal["success", "failure"], outcome_meta: dict|None = None) -> OutcomeRecord|None:
+    def settle_interaction(self, interaction_id: str, evaluator_id: str, outcome_status: OutcomeStatus, outcome_meta: dict[str,Any]|None = None) -> OutcomeRecord|None:
         interaction = self.get_interaction(interaction_id)
 
         if interaction is None or interaction.status != "pending":
@@ -219,51 +258,60 @@ class BintWorldModel(mesa.Model):
         if outcome is None:
             return None
 
-        if outcome.status == "success":
-            self.mint_tnft(
-                issuer_id=evaluator_id,
-                receiver_id=interaction.trustee_id,
-                interaction_type="reward",
-                service_type=interaction.service_type,
-                interaction_id=interaction_id,
-                meta={
-                    "interaction_metadata": dict(interaction.meta),
-                    "outcome_metadata": dict(outcome.meta),
-                },
-            )
-            interaction.status = "completed"
+        self._apply_outcome_to_interaction(
+            interaction=interaction,
+            outcome=outcome,
+            evaluator_id=evaluator_id,
+        )
+        return outcome
 
-        elif outcome.status == "failure":
+
+    def _apply_outcome_to_interaction(self, interaction: InteractionRecord, outcome: OutcomeRecord, evaluator_id: str) -> None:
+        if outcome.status == "success":
+            self._reward_successful_interaction(interaction, outcome, evaluator_id)
+            interaction.status = "completed"
+            return
+
+        if outcome.status == "failure":
             burned = self.burn_tnft(
                 burner_id=evaluator_id,
                 target_id=interaction.trustee_id,
                 service_type=interaction.service_type,
             )
             interaction.status = "completed" if burned else "cancelled"
+            return
 
-        else:  # disputed
-            interaction.status = "cancelled"
+        interaction.status = "cancelled"
 
-        return outcome
+
+    def _reward_successful_interaction(self, interaction: InteractionRecord, outcome: OutcomeRecord|None, evaluator_id: str) -> None:
+        self.mint_tnft(
+            issuer_id=evaluator_id,
+            receiver_id=interaction.trustee_id,
+            interaction_type="reward",
+            service_type=interaction.service_type,
+            interaction_id=interaction.interaction_id,
+            meta={
+                "interaction_metadata": dict(interaction.meta),
+                "outcome_metadata": dict(outcome.meta),
+            },
+        )
 
 
     def seed_genesis_tnfts(self) -> None:
-        if not self.cached_delivery_agents:
-            return
-
         for agent in self.cached_delivery_agents:
             for _ in range(self.genesis_tokens):
                 self.mint_tnft(
-                    issuer_id="SYSTEM",
+                    issuer_id=SYSTEM_ISSUER_ID,
                     receiver_id=agent.unique_id,
                     interaction_type="bootstrap",
-                    service_type="map_data",
+                    service_type=MAP_DATA_SERVICE,
                     interaction_id=None,
                     meta={"bootstrap": True},
                 )
 
 
-    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str, service_type: str, interaction_id: str|None, meta: dict|None=None) -> int:
+    def mint_tnft(self, issuer_id: str, receiver_id: str, interaction_type: str, service_type: str, interaction_id: str|None, meta: dict[str,Any]|None=None) -> int:
         self.nft_counter += 1
 
         tnft = {
@@ -280,14 +328,14 @@ class BintWorldModel(mesa.Model):
         self.tnft_ledger.append(tnft)
 
         # update cache
-        target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == receiver_id), None)
+        target_agent = self._find_delivery_agent(receiver_id)
         if target_agent is not None:
             target_agent.cached_active_tnfts += 1
 
         return tnft["id"]
 
 
-    def get_vtp(self, agent_id: str,service_type: str|None = None, active_only: bool = True) -> list[dict]:
+    def get_vtp(self, agent_id: str,service_type: str|None = None, active_only: bool = True) -> list[dict[str,Any]]:
         tnfts = [t for t in self.tnft_ledger if t["owner"] == agent_id]
 
         if active_only:
@@ -296,18 +344,13 @@ class BintWorldModel(mesa.Model):
         if service_type is not None:
             tnfts = [nft for nft in tnfts if nft["service_type"] == service_type]
 
-        tnfts.sort(key=lambda t: t["timestamp"], reverse=True)
-        return tnfts
+        return sorted(tnfts, key=lambda tnft: tnft["timestamp"], reverse=True)
 
 
     def get_vtp_summary(self, agent_id: str, service_type: str|None=None) -> dict:
         tnfts = self.get_vtp(agent_id, service_type=service_type, active_only=True)
-
         earned_tnfts = [t for t in tnfts if t["type"] != "bootstrap"]
         bootstrap_tnfts = [t for t in tnfts if t["type"] == "bootstrap"]
-
-        # simple scoring for now
-        score = (1.0 * len(earned_tnfts)) + (0.25 * len(bootstrap_tnfts))
 
         return {
             "agent_id": agent_id,
@@ -315,9 +358,14 @@ class BintWorldModel(mesa.Model):
             "total_active": len(tnfts),
             "earned_active": len(earned_tnfts),
             "bootstrap_active": len(bootstrap_tnfts),
-            "score": score,
+            "score": self._calculate_trust_score(earned_tnfts, bootstrap_tnfts),
             "tnfts": tnfts,
         }
+
+
+    @staticmethod
+    def _calculate_trust_score(earned_tnfts: list[dict[str,Any]], bootstrap_tnfts: list[dict[str,Any]]) -> float:
+        return (1.0 * len(earned_tnfts)) + (0.25 * len(bootstrap_tnfts))
 
 
     def query_vtp(self, agent_id: str) -> int:
@@ -343,7 +391,7 @@ class BintWorldModel(mesa.Model):
         tnft_to_burn["burned_by"] = burner_id
         tnft_to_burn["burn_timestamp"] = self.time
 
-        target_agent = next((a for a in self.cached_delivery_agents if a.unique_id == target_id), None)
+        target_agent = self._find_delivery_agent(target_id)
         if target_agent is not None:
             target_agent.cached_active_tnfts = max(0, target_agent.cached_active_tnfts - 1)
             target_agent.cached_burned_tnfts += 1
@@ -351,19 +399,13 @@ class BintWorldModel(mesa.Model):
         return  True
 
 
-    def calc_global_trust(self, agent_id: str) -> float:
-        agent_tnfts = [nft for nft in self.tnft_ledger if nft["receiver"] == agent_id]
-
-        if not agent_tnfts:
-            return 0.0
-
-        pos_tnfts = sum(1 for nft in agent_tnfts if nft["positive"])
-        total_count = max(5, len(agent_tnfts))
-
-        return float(pos_tnfts/total_count)
+    def _find_delivery_agent(self, agent_id: str) -> DeliveryAgent | None:
+        return next((agent for agent in self.cached_delivery_agents if agent.unique_id == agent_id), None)
 
 
-    def request_map_data(self, requester: DeliveryAgent, target_name: str) -> list:
+
+
+    def request_map_data(self, requester: DeliveryAgent, target_name: str) -> list[dict[str,Any]]:
         responses = []
 
         for agent in self.cached_delivery_agents:
@@ -376,19 +418,13 @@ class BintWorldModel(mesa.Model):
                 if agent_resp is None:
                     continue
 
-                dist = self.chebyshev_distance(requester.cell.coordinate, agent.cell.coordinate)
-                responses.append({"agent": agent.unique_id, "dist": dist, "coord": agent_resp})
+                responses.append(
+                    {"agent": agent.unique_id,
+                     "dist": self.chebyshev_distance(requester.cell.coordinate, agent.cell.coordinate,),
+                     "coord": agent_resp,}
+                )
 
-        responses.sort(key=lambda x: x["dist"])
-
-        return responses
-
-        # for response in responses:
-        #     # Always accept for now
-        #     requester.update_internal_map(response["coord"], "drop_off", response["agent"], target_name)
-        #     return True
-        #
-        # return False
+        return sorted(responses, key=lambda response: response["dist"])
 
 
     def distribute_initial_knowledge(self) -> None:
@@ -423,10 +459,7 @@ class BintWorldModel(mesa.Model):
 
         # get the names of each drop off location
 
-        for agent in self.cached_delivery_agents:
-            if agent.goal_name is not None:
-                continue
-
+        for agent in self._agents_without_packages():
             possible_destinations = [d for d in self.cached_drop_offs if d.unique_id != agent.prev_goal_name]
             if not possible_destinations:
                 continue
@@ -444,37 +477,39 @@ class BintWorldModel(mesa.Model):
             agent.receive_package(package)
 
 
-    def verify_delivery(self, agent: DeliveryAgent, package: dict):
-        base_points = 1.0
+    def _agents_without_packages(self) -> list[DeliveryAgent]:
+        return [agent for agent in self.cached_delivery_agents if agent.goal_name is None]
+
+
+    def verify_delivery(self, agent: DeliveryAgent, package: dict[str, Any]) -> bool:
         agents_on_cell = [a.unique_id for a in agent.cell.agents]
 
-        if agent.goal_name in agents_on_cell:
-            min_steps = package["min_steps"]
-            max_steps = package["max_steps"]
-            steps_taken = package["steps_taken"]
+        if agent.goal_name not in agents_on_cell:
+            return False
 
-            window = max_steps - min_steps
-            grace_steps = min_steps + int(window * 0.3)
+        min_steps = package["min_steps"]
+        max_steps = package["max_steps"]
+        steps_taken = package["steps_taken"]
 
-            if steps_taken <= grace_steps:
-                points_awarded = base_points
+        window = max_steps - min_steps
+        grace_steps = min_steps + int(window * GRACE_WINDOW_RATIO)
 
-            elif steps_taken <= max_steps:
-                if max_steps > grace_steps:
-                    decay_ratio = (max_steps - steps_taken) / (max_steps - grace_steps)
-                    points_awarded = float(base_points * decay_ratio)
-                else:
-                    points_awarded = 0.0
+        if steps_taken <= grace_steps:
+            points_awarded = BASE_DELIVERY_POINTS
 
+        elif steps_taken <= max_steps:
+            if max_steps == grace_steps:
+                points_awarded = 0.0
             else:
-                lateness = steps_taken - max_steps
-                points_awarded = max(-base_points * 2, float(-lateness * 0.5))
+                decay_ratio = (max_steps - steps_taken) / (max_steps - grace_steps)
+                points_awarded = float(BASE_DELIVERY_POINTS * decay_ratio)
 
-            agent.points += points_awarded
+        else:
+            lateness = steps_taken - max_steps
+            points_awarded = -lateness * LATE_PENALTY_PER_STEP
 
-            return True
-
-        return False
+        agent.points += points_awarded
+        return True
 
 
     @staticmethod
@@ -492,8 +527,7 @@ class BintWorldModel(mesa.Model):
 
 
     def export_end_of_run_data(self) -> None:
-        export_dir = "exports"
-        os.makedirs(export_dir, exist_ok=True)
+        os.makedirs(EXPORT_DIR, exist_ok=True)
         run_uuid = uuid.uuid4().hex[:8]
 
         export_payload = {
@@ -524,6 +558,6 @@ class BintWorldModel(mesa.Model):
             "tnft_ledger": self.tnft_ledger,
         }
 
-        filename = os.path.join(export_dir, f"run_{self.rng_seed}_{run_uuid}.json")
+        filename = os.path.join(EXPORT_DIR, f"run_{self.rng_seed}_{run_uuid}.json")
         with open(filename, "w") as f:
             json.dump(export_payload, f, indent=4)
