@@ -280,12 +280,12 @@ def TNFTsOverTime(model: BintWorldModel):
         return CompactFigureMatplotlib(fig)
 
     if not df_honest.empty:
-        vtp_df = df_honest.unstack(level="AgentID")["Active TNFTs"]
+        vtp_df = df_honest.unstack(level="AgentID")["active_tnfts"]
         for agent_id in vtp_df.columns:
             ax.plot(vtp_df.index, vtp_df[agent_id], alpha=0.7)
 
     if not df_malicious.empty:
-        vtp_df = df_malicious.unstack(level="AgentID")["Active TNFTs"]
+        vtp_df = df_malicious.unstack(level="AgentID")["active_tnfts"]
         for agent_id in vtp_df.columns:
             ax.plot(vtp_df.index, vtp_df[agent_id], linestyle="--", linewidth=2)
 
@@ -316,12 +316,12 @@ def PointsOverTime(model: BintWorldModel):
         return CompactFigureMatplotlib(fig)
 
     if not df_honest.empty:
-        points_df = df_honest.unstack(level="AgentID")["Points"]
+        points_df = df_honest.unstack(level="AgentID")["points"]
         for agent_id in points_df.columns:
             ax.plot(points_df.index, points_df[agent_id], alpha=0.7)
 
     if not df_malicious.empty:
-        points_df = df_malicious.unstack(level="AgentID")["Points"]
+        points_df = df_malicious.unstack(level="AgentID")["points"]
         for agent_id in points_df.columns:
             ax.plot(points_df.index, points_df[agent_id], linestyle="--", linewidth=2)
 
@@ -346,12 +346,12 @@ def DeliveriesOverTime(model: BintWorldModel):
         return CompactFigureMatplotlib(fig)
 
     if not df_honest.empty:
-        del_df = df_honest.unstack(level="AgentID")["Deliveries"]
+        del_df = df_honest.unstack(level="AgentID")["delivery_count"]
         for agent_id in del_df.columns:
             ax.plot(del_df.index, del_df[agent_id], alpha=0.7)
 
     if not df_malicious.empty:
-        del_df = df_malicious.unstack(level="AgentID")["Deliveries"]
+        del_df = df_malicious.unstack(level="AgentID")["delivery_count"]
         for agent_id in del_df.columns:
             ax.plot(del_df.index, del_df[agent_id], linestyle="--", linewidth=2)
 
