@@ -1,16 +1,20 @@
-import mesa
-import pandas as pd
-from matplotlib.ticker import MaxNLocator
-from mesa.visualization import SolaraViz, SpaceRenderer
-from mesa.visualization.components import AgentPortrayalStyle, PropertyLayerStyle
-import mesa.visualization.solara_viz as mesa_solara_viz
-import solara
-from solara import lab
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
+from mesa.visualization import SolaraViz
+import mesa.visualization.solara_viz as mesa_solara_viz
 from mesa.visualization.utils import update_counter
+import solara
 
 from agents import DeliveryAgent, DropOffLocationAgent, MaliciousMapDeliveryAgent
 from model import BintWorldModel
+
+
+HONEST_AGENT_COLOR = "blue"
+MALICIOUS_AGENT_COLOR = "red"
+DROP_OFF_COLOR = "black"
+
+AGENT_MARKER = "o"
+DROP_OFF_MARKER = "s"
 
 rng = 188422084722
 width = 150
@@ -166,8 +170,8 @@ def DynamicMap(model: BintWorldModel):
         """
     )
 
-    grid_width = model.grid.width
-    grid_height = model.grid.height
+    grid_width = model.width
+    grid_height = model.height
 
     dpi = 120
     target_cell_px = 20
@@ -207,17 +211,19 @@ def DynamicMap(model: BintWorldModel):
         ys = [a.cell.coordinate[1] for a in model.cached_drop_offs]
         ax.scatter(xs, ys, color="black", marker="s", s=marker_area)
 
-    honest = [a for a in model.cached_delivery_agents if type(a) is DeliveryAgent]
+    malicious = [agent for agent in model.cached_delivery_agents if isinstance(agent, MaliciousMapDeliveryAgent)]
+
+    honest = [agent for agent in model.cached_delivery_agents if isinstance(agent, DeliveryAgent) and not isinstance(agent, MaliciousMapDeliveryAgent)]
+
     if honest:
         xs = [a.cell.coordinate[0] for a in honest]
         ys = [a.cell.coordinate[1] for a in honest]
         ax.scatter(xs, ys, color="blue", marker="o", s=marker_area)
 
-    malicious = [a for a in model.cached_delivery_agents if type(a) is MaliciousMapDeliveryAgent]
     if malicious:
         xs = [a.cell.coordinate[0] for a in malicious]
         ys = [a.cell.coordinate[1] for a in malicious]
-        ax.scatter(xs, ys, color="red", marker="o", s=marker_area)
+        ax.scatter(xs, ys, color=DROP_OFF_COLOR, marker=DROP_OFF_MARKER, s=marker_area)
 
     ax.set_xlim(-0.5, grid_width - 0.5)
     ax.set_ylim(-0.5, grid_height - 0.5)
@@ -293,8 +299,8 @@ def TNFTsOverTime(model: BintWorldModel):
     ax.set_xlabel("Step")
     ax.set_ylabel("TNFT Balance")
 
-    ax.axhline(y=1, color="gray", linestyle=":", label="Trust Threshold")
-    ax.legend(loc="upper left", fontsize=7, frameon=False)
+    # ax.axhline(y=1, color="gray", linestyle=":", label="Trust Threshold")
+    # ax.legend(loc="upper left", fontsize=7, frameon=False)
 
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -375,7 +381,14 @@ def AnalyticsDashboard(model: BintWorldModel):
             PointsOverTime(model)
 
 
-bint = BintWorldModel()
+bint = BintWorldModel(
+    rng=rng,
+    width=width,
+    height=height,
+    num_delivery=num_delivery,
+    num_map_malicious=num_map_malicious,
+    num_drop_offs=num_drop_offs,
+)
 
 page = SolaraViz(
     model=bint,
