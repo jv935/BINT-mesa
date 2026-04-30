@@ -104,6 +104,9 @@ class DeliveryAgent(CellAgent):
         if moved:
             self.move_relative((dx, dy))
 
+            if self.package is not None:
+                self.package["steps_taken"] += 1
+
         # could maybe check if the agent is on cell from the get-go?
         # would need to change a bunch of stuff tho
 
@@ -284,9 +287,7 @@ class DeliveryAgent(CellAgent):
                 self.state = "EXPLORING" if self.target_coordinate is not None else "IDLE"
 
         if self.target_coordinate is not None:
-            moved = self.move()
-            if moved and self.package is not None:
-                self.package["steps_taken"] += 1
+            self.move()
 
 
 class DropOffLocationAgent(FixedAgent):
