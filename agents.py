@@ -1,6 +1,32 @@
 import mesa
 from mesa.discrete_space import CellAgent, FixedAgent
 from typing_extensions import override
+from typing import Any, Literal, TypedDict
+
+Coordinate = tuple[int, int]
+AgentState = Literal["IDLE", "EXPLORING", "DELIVERING"]
+
+STATE_IDLE = "IDLE"
+STATE_EXPLORING = "EXPLORING"
+STATE_DELIVERING = "DELIVERING"
+
+ENV_FLOOR = "floor"
+ENV_DROP_OFF = "drop_off"
+
+SOURCE_SELF = "self"
+MAP_DATA_SERVICE = "map_data"
+
+
+class Package(TypedDict):
+    destination: str
+    max_steps: int
+    min_steps: int
+    steps_taken: int
+
+
+class MapRecord(TypedDict):
+    type: str
+    source: str
 
 
 class DeliveryAgent(CellAgent):
@@ -15,20 +41,23 @@ class DeliveryAgent(CellAgent):
 
         super().__init__(model)
         self.cell = cell
-        self.internal_map: dict[tuple[int, int], dict] = {}
-        self.known_drop_offs: dict[str, tuple[int, int]] = {}
-        self.goal_name = None
-        self.prev_goal_name = None
-        self.state = "IDLE"
-        self.target_coordinate = None
+        self.internal_map: dict[Coordinate, MapRecord] = {}
+        self.known_drop_offs: dict[str, Coordinate] = {}
+
+        self.goal_name: str | None = None
+        self.prev_goal_name: str | None = None
+        self.state: AgentState = STATE_IDLE
+        self.target_coordinate: Coordinate | None = None
+
+        self.package: Package | None = None
+        self.current_provider_id: str | None = None
+        self.current_interaction_id: str | None = None
+
         self.vision_radius = vision_radius
         self.trust_threshold = trust_threshold
         self.points = 0.0
-        self.package = None
-        self.current_provider_id = None
         self.delivery_count = 0
         self._all_possible_coords = model.all_coordinates
-        self.current_interaction_id = None
         self.cached_active_tnfts = 0
         self.cached_burned_tnfts = 0
 
@@ -49,6 +78,7 @@ class DeliveryAgent(CellAgent):
     def verify_vtp(self, target_id: str, service_type: str="map_data") -> bool:
         summary = self.model.get_vtp_summary(target_id, service_type)
         return summary["score"] >= self.trust_threshold
+
 
     def build_outcome_meta(self) -> dict:
         if self.package is None:
@@ -79,106 +109,124 @@ class DeliveryAgent(CellAgent):
 
     def move(self) -> bool:
         """
-        Move towards the internal target coordinate.
-        Can move 1 cell in one of 8 directions at a time.
+        Move one step toward the current target coordinate.
+        Returns True if the agent moved, False otherwise.
         """
+        if self.target_coordinate is None:
+            return False
+
+        moved = self._move_one_step_towards_target()
+
+        if moved and self.package is not None:
+            self.package["steps_taken"] += 1
+
+        if self.cell.coordinate == self.target_coordinate:
+            self._handle_target_reached()
+
+        return moved
+
+
+    def _move_one_step_towards_target(self) -> bool:
         if self.target_coordinate is None:
             return False
 
         current_x, current_y = self.cell.coordinate
         target_x, target_y = self.target_coordinate
 
-        dx = 0
-        if current_x < target_x:
-            dx = 1
-        elif current_x > target_x:
-            dx = -1
+        dx = 1 if current_x < target_x else -1 if current_x > target_x else 0
+        dy = 1 if current_y < target_y else -1 if current_y > target_y else 0
 
-        dy = 0
-        if current_y < target_y:
-            dy = 1
-        elif current_y > target_y:
-            dy = -1
+        if dx == 0 and dy == 0:
+            return False
 
-        moved = dx != 0 or dy != 0
-        if moved:
-            self.move_relative((dx, dy))
-
-            if self.package is not None:
-                self.package["steps_taken"] += 1
-
-        # could maybe check if the agent is on cell from the get-go?
-        # would need to change a bunch of stuff tho
-
-        if self.cell.coordinate == self.target_coordinate:
-            agents_on_cell = [a.unique_id for a in self.cell.agents]
-
-            # if the delivery location is here
-            if self.state == "DELIVERING":
-                if self.goal_name in agents_on_cell:
-                    previous_points = self.points
-                    success = self.model.verify_delivery(self, self.package)
-
-                    if success:
-                        self.delivery_count += 1
-
-                        if self.current_interaction_id is not None:
-                            outcome_meta = self.build_outcome_meta()
-                            outcome_meta["points_delta"] = self.points - previous_points
-
-                            self.model.settle_interaction(
-                                interaction_id=self.current_interaction_id,
-                                evaluator_id=self.unique_id,
-                                outcome_status="success",
-                                outcome_meta=outcome_meta
-                            )
-
-                        self.prev_goal_name = self.goal_name
-                        self.goal_name = None
-                        self.package = None
-
-                else:
-                    if self.current_interaction_id is not None:
-                        outcome_meta = self.build_outcome_meta()
-                        outcome_meta["points_delta"] = 0.0
-
-                        self.model.settle_interaction(
-                            interaction_id=self.current_interaction_id,
-                            evaluator_id=self.unique_id,
-                            outcome_status="failure",
-                            outcome_meta=outcome_meta
-                        )
-
-                    if self.goal_name in self.known_drop_offs:
-                        del self.known_drop_offs[self.goal_name]
-
-                    if self.target_coordinate in self.internal_map:
-                        del self.internal_map[self.target_coordinate]
-
-            self.state = "IDLE"
-            self.target_coordinate = None
-            self.current_provider_id = None
-            self.current_interaction_id = None
-
-        return moved
+        self.move_relative((dx, dy))
+        return True
 
 
-    def update_internal_map(self, coordinate: tuple[int, int], env_type: str, info_source: str="self", drop_off_name: str|None=None) -> None:
+    def _handle_target_reached(self) -> None:
+        if self.state == STATE_DELIVERING:
+            if self._goal_drop_off_is_on_current_cell():
+                self._complete_delivery()
+            else:
+                self._handle_bad_delivery_target()
+
+        self._clear_current_target()
+
+
+    def _goal_drop_off_is_on_current_cell(self) -> bool:
+        if self.goal_name is None:
+            return False
+
+        return any(agent.unique_id == self.goal_name for agent in self.cell.agents)
+
+
+    def _complete_delivery(self) -> None:
+        if self.package is None:
+            return
+
+        previous_points = self.points
+        success = self.model.verify_delivery(self, self.package)
+
+        if not success:
+            return
+
+        self.delivery_count += 1
+        self._settle_current_interaction(
+            outcome_status="success",
+            points_delta=self.points - previous_points,
+        )
+
+        self.prev_goal_name = self.goal_name
+        self.goal_name = None
+        self.package = None
+
+
+    def _handle_bad_delivery_target(self) -> None:
+        self._settle_current_interaction(
+            outcome_status="failure",
+            points_delta=0.0,
+        )
+
+        if self.goal_name is not None:
+            self.known_drop_offs.pop(self.goal_name, None)
+
+        if self.target_coordinate is not None:
+            self.internal_map.pop(self.target_coordinate, None)
+
+
+    def _settle_current_interaction(self, outcome_status: Literal["success", "failure"], points_delta: float) -> None:
+        if self.current_interaction_id is None:
+            return
+
+        outcome_meta = self.build_outcome_meta()
+        outcome_meta["points_delta"] = points_delta
+
+        self.model.settle_interaction(
+            interaction_id=self.current_interaction_id,
+            evaluator_id=self.unique_id,
+            outcome_status=outcome_status,
+            outcome_meta=outcome_meta,
+        )
+
+
+    def _clear_current_target(self) -> None:
+        self.state = STATE_IDLE
+        self.target_coordinate = None
+        self.current_provider_id = None
+        self.current_interaction_id = None
+
+
+    def update_internal_map(self, coordinate: Coordinate, env_type: str, info_source: str = SOURCE_SELF,drop_off_name: str | None = None) -> None:
         """
-        Updates the internal map of the agent.
+        Update the agent's internal map.
 
-        :param coordinate: The coordinate to store.
-        :param env_type: Can be 'floor' or 'drop_off'.
-        :param info_source: Either 'self' or the id of the agent that provided the information.
-        :param drop_off_name: The name of the drop-off location.
+        Direct observations from the agent itself are treated as stronger than
+        information received from other agents.
         """
-
-        # If coordinate already has a record
         if coordinate in self.internal_map:
             existing_source = self.internal_map[coordinate]["source"]
 
-            # Do not overwrite direct map info with indirect info
-            if existing_source == "self" and info_source != "self":
+            if existing_source == SOURCE_SELF and info_source != SOURCE_SELF:
                 return
 
         self.internal_map[coordinate] = {
@@ -186,16 +234,18 @@ class DeliveryAgent(CellAgent):
             "source": info_source,
         }
 
-        # If it's a drop-off add it to the drop-off index
         if drop_off_name is not None:
             self.known_drop_offs[drop_off_name] = coordinate
 
 
-    def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
-        if self.verify_vtp(requester.unique_id) and target in self.known_drop_offs:
-            return self.known_drop_offs[target]
+    def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
+        if target not in self.known_drop_offs:
+            return None
 
-        return None
+        if not self.verify_vtp(requester.unique_id, MAP_DATA_SERVICE):
+            return None
+
+        return self.known_drop_offs[target]
 
 
     def perceive_env(self) -> None:
@@ -203,24 +253,18 @@ class DeliveryAgent(CellAgent):
         Check area visible in vision range and update internal map.
         """
 
-        visible_area = self.cell.get_neighborhood(
-            include_center=True,
-            radius=self.vision_radius,
-        ).cells
+        visible_area = self.cell.get_neighborhood(include_center=True,radius=self.vision_radius).cells
 
         for cell in visible_area:
-            drop_off = next(
-                (agent for agent in cell.agents if isinstance(agent, DropOffLocationAgent)),
-                None
-            )
+            drop_off = next((agent for agent in cell.agents if isinstance(agent, DropOffLocationAgent)),None)
 
             if drop_off is not None:
-                self.update_internal_map(cell.coordinate, "drop_off", drop_off_name=drop_off.unique_id)
+                self.update_internal_map(cell.coordinate, ENV_DROP_OFF, drop_off_name=drop_off.unique_id)
             else:
-                self.update_internal_map(cell.coordinate, "floor")
+                self.update_internal_map(cell.coordinate, ENV_FLOOR)
 
 
-    def receive_package(self, package: dict) -> None:
+    def receive_package(self, package: Package) -> None:
         """
         Set new goal location.
 
@@ -231,7 +275,7 @@ class DeliveryAgent(CellAgent):
         self.package["steps_taken"] = 0
 
 
-    def select_unexplored_coordinate(self) -> None|tuple[int, int]:
+    def select_unexplored_coordinate(self) -> Coordinate|None:
         """
         Randomly select an unexplored coordinate.
         If there are no unexplored coordinates, return None.
@@ -251,43 +295,103 @@ class DeliveryAgent(CellAgent):
     def step(self) -> None:
         self.perceive_env()
 
-        if self.goal_name is None or self.package is None:
+        if not self._has_active_package():
             return
 
-        if self.goal_name in self.known_drop_offs and self.state != "DELIVERING":
-            self.target_coordinate = self.known_drop_offs[self.goal_name]
-            self.state = "DELIVERING"
+        if self._knows_goal_location() and self.state != STATE_DELIVERING:
+            self._start_delivering_to_known_goal()
 
-        elif self.state == "IDLE" or (self.state == "EXPLORING" and (self.target_coordinate is None or self.target_coordinate in self.internal_map)):
-            responses = self.model.request_map_data(self, self.goal_name)
-            success = False
+        elif self._should_search_for_goal_location():
+            found_goal_location = self._try_get_goal_location_from_other_agent()
 
-            for response in responses:
-                provider_id = response["agent"]
-
-                if self.verify_vtp(provider_id):
-                    self.update_internal_map(response["coord"], "drop_off", response["agent"], self.goal_name)
-
-                    if self.goal_name in self.known_drop_offs:
-                        self.current_provider_id = provider_id
-                        self.current_interaction_id = self.model.record_interaction(
-                            truster_id=self.unique_id,
-                            trustee_id=provider_id,
-                            service_type="map_data",
-                            meta={"goal_name": self.goal_name, "shared_coordinate": response["coord"]},
-                        )
-                        success = True
-                        break
-
-            if success:
-                self.target_coordinate = self.known_drop_offs[self.goal_name]
-                self.state = "DELIVERING"
+            if found_goal_location:
+                self._start_delivering_to_known_goal()
             else:
-                self.target_coordinate = self.select_unexplored_coordinate()
-                self.state = "EXPLORING" if self.target_coordinate is not None else "IDLE"
+                self._start_exploring()
 
         if self.target_coordinate is not None:
             self.move()
+
+
+    def _has_active_package(self) -> bool:
+        return self.goal_name is not None and self.package is not None
+
+
+    def _knows_goal_location(self) -> bool:
+        return self.goal_name is not None and self.goal_name in self.known_drop_offs
+
+
+    def _start_delivering_to_known_goal(self) -> None:
+        if self.goal_name is None:
+            return
+
+        self.target_coordinate = self.known_drop_offs[self.goal_name]
+        self.state = STATE_DELIVERING
+
+
+    def _should_search_for_goal_location(self) -> bool:
+        if self.state == STATE_IDLE:
+            return True
+
+        if self.state != STATE_EXPLORING:
+            return False
+
+        return (
+                self.target_coordinate is None
+                or self.target_coordinate in self.internal_map
+        )
+
+
+    def _try_get_goal_location_from_other_agent(self) -> bool:
+        if self.goal_name is None:
+            return False
+
+        responses = self.model.request_map_data(self, self.goal_name)
+
+        for response in responses:
+            if self._accept_map_response(response):
+                return True
+
+        return False
+
+
+    def _accept_map_response(self, response: dict[str, Any]) -> bool:
+        if self.goal_name is None:
+            return False
+
+        provider_id = response["agent"]
+
+        if not self.verify_vtp(provider_id, MAP_DATA_SERVICE):
+            return False
+
+        self.update_internal_map(
+            coordinate=response["coord"],
+            env_type=ENV_DROP_OFF,
+            info_source=provider_id,
+            drop_off_name=self.goal_name,
+        )
+
+        if self.goal_name not in self.known_drop_offs:
+            return False
+
+        self.current_provider_id = provider_id
+        self.current_interaction_id = self.model.record_interaction(
+            truster_id=self.unique_id,
+            trustee_id=provider_id,
+            service_type=MAP_DATA_SERVICE,
+            meta={
+                "goal_name": self.goal_name,
+                "shared_coordinate": response["coord"],
+            },
+        )
+
+        return True
+
+
+    def _start_exploring(self) -> None:
+        self.target_coordinate = self.select_unexplored_coordinate()
+        self.state = STATE_EXPLORING if self.target_coordinate is not None else STATE_IDLE
+
 
 
 class DropOffLocationAgent(FixedAgent):
