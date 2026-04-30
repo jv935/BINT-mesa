@@ -16,6 +16,9 @@ MAP_DATA_SERVICE = "map_data"
 SYSTEM_ISSUER_ID = "SYSTEM"
 EXPORT_DIR = "exports"
 
+CONTEXT_MATCH_WEIGHT = 1.0
+OTHER_CONTEXT_WEIGHT = 0.25
+
 BASE_DELIVERY_POINTS = 10.0
 GRACE_WINDOW_RATIO = 0.3
 LATE_PENALTY_PER_STEP = 1.0
@@ -305,7 +308,7 @@ class BintWorldModel(mesa.Model):
                     issuer_id=SYSTEM_ISSUER_ID,
                     receiver_id=agent.unique_id,
                     interaction_type="bootstrap",
-                    service_type=MAP_DATA_SERVICE,
+                    service_type="bootstrap",
                     interaction_id=None,
                     meta={"bootstrap": True},
                 )
@@ -348,24 +351,34 @@ class BintWorldModel(mesa.Model):
 
 
     def get_vtp_summary(self, agent_id: str, service_type: str|None=None) -> dict:
-        tnfts = self.get_vtp(agent_id, service_type=service_type, active_only=True)
-        earned_tnfts = [t for t in tnfts if t["type"] != "bootstrap"]
-        bootstrap_tnfts = [t for t in tnfts if t["type"] == "bootstrap"]
+        active_tnfts = self.get_vtp(agent_id, service_type=None, active_only=True)
+
+        if service_type is None:
+            context_matching_active_tnfts = active_tnfts
+            other_active_tnfts = []
+        else:
+            context_matching_active_tnfts = [tnft for tnft in active_tnfts if tnft["service_type"] == service_type]
+            other_active_tnfts = [tnft for tnft in active_tnfts if tnft["service_type"] != service_type]
 
         return {
             "agent_id": agent_id,
             "service_type": service_type,
-            "total_active": len(tnfts),
-            "earned_active": len(earned_tnfts),
-            "bootstrap_active": len(bootstrap_tnfts),
-            "score": self._calculate_trust_score(earned_tnfts, bootstrap_tnfts),
-            "tnfts": tnfts,
+            "total_active": len(active_tnfts),
+            "context_matching_active": len(context_matching_active_tnfts),
+            "other_active": len(other_active_tnfts),
+            "score": self._calculate_trust_score(
+                context_matching_tnfts=context_matching_active_tnfts,
+                other_tnfts=other_active_tnfts
+            ),
+            "tnfts": active_tnfts,
+            "context_matching": context_matching_active_tnfts,
+            "other_tnfts": other_active_tnfts
         }
 
 
     @staticmethod
-    def _calculate_trust_score(earned_tnfts: list[dict[str,Any]], bootstrap_tnfts: list[dict[str,Any]]) -> float:
-        return (1.0 * len(earned_tnfts)) + (0.25 * len(bootstrap_tnfts))
+    def _calculate_trust_score(context_matching_tnfts: list[dict[str, Any]], other_tnfts: list[dict[str, Any]]) -> float:
+        return CONTEXT_MATCH_WEIGHT * len(context_matching_tnfts) + OTHER_CONTEXT_WEIGHT * len(other_tnfts)
 
 
     def query_vtp(self, agent_id: str) -> int:
@@ -506,7 +519,7 @@ class BintWorldModel(mesa.Model):
 
         else:
             lateness = steps_taken - max_steps
-            points_awarded = -lateness * LATE_PENALTY_PER_STEP
+            points_awarded = max(-max_steps, -lateness * LATE_PENALTY_PER_STEP)
 
         agent.points += points_awarded
         return True
