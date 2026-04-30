@@ -519,7 +519,7 @@ class BintWorldModel(mesa.Model):
 
         else:
             lateness = steps_taken - max_steps
-            points_awarded = max(-max_steps, -lateness * LATE_PENALTY_PER_STEP)
+            points_awarded = max((-max_steps * 2), (-lateness * LATE_PENALTY_PER_STEP))
 
         agent.points += points_awarded
         return True
