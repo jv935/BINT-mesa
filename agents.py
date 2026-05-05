@@ -61,6 +61,12 @@ class DeliveryAgent(CellAgent):
         self.cached_active_tnfts = 0
         self.cached_burned_tnfts = 0
 
+        # Evaluation trace state for the most recent map share response.
+        self.last_share_mode = "none"
+        self.last_share_was_malicious = False
+        self.last_share_coordinate: Coordinate | None = None
+        self.last_share_target: str | None = None
+
 
     @property
     def map_size(self) -> int:
@@ -81,29 +87,54 @@ class DeliveryAgent(CellAgent):
 
 
     def build_outcome_meta(self) -> dict:
+        true_goal_coordinate = self.model.get_drop_off_coordinate(self.goal_name)
+        ended_on_coordinate = self.cell.coordinate
+        target_coordinate = self.target_coordinate
+
+        base_meta = {
+            "goal_name": self.goal_name,
+            "target_coordinate": target_coordinate,
+            "target_x": target_coordinate[0] if target_coordinate is not None else None,
+            "target_y": target_coordinate[1] if target_coordinate is not None else None,
+            "true_goal_coordinate": true_goal_coordinate,
+            "true_goal_x": true_goal_coordinate[0] if true_goal_coordinate is not None else None,
+            "true_goal_y": true_goal_coordinate[1] if true_goal_coordinate is not None else None,
+            "target_is_true_goal": target_coordinate == true_goal_coordinate,
+            "ended_on_coordinate": ended_on_coordinate,
+            "ended_x": ended_on_coordinate[0],
+            "ended_y": ended_on_coordinate[1],
+            "ended_at_true_goal": ended_on_coordinate == true_goal_coordinate,
+            "provider_id": self.current_provider_id,
+            "interaction_id": self.current_interaction_id,
+        }
+
         if self.package is None:
             return {
-                "goal_name": self.goal_name,
+                **base_meta,
                 "steps_taken": None,
                 "min_steps": None,
                 "max_steps": None,
                 "extra_steps": None,
-                "target_coordinate": self.target_coordinate,
-                "ended_on_coordinate": self.cell.coordinate,
+                "lateness": None,
+                "normalized_extra_steps": None,
+                "delivery_efficiency": None,
             }
 
         steps_taken = self.package["steps_taken"]
         min_steps = self.package["min_steps"]
         max_steps = self.package["max_steps"]
+        extra_steps = max(0, steps_taken - min_steps)
+        lateness = max(0, steps_taken - max_steps)
 
         return {
-            "goal_name": self.goal_name,
+            **base_meta,
             "steps_taken": steps_taken,
             "min_steps": min_steps,
             "max_steps": max_steps,
-            "extra_steps": max(0, steps_taken - min_steps),
-            "target_coordinate": self.target_coordinate,
-            "ended_on_coordinate": self.cell.coordinate,
+            "extra_steps": extra_steps,
+            "lateness": lateness,
+            "normalized_extra_steps": extra_steps / max(min_steps, 1),
+            "delivery_efficiency": min_steps / max(steps_taken, 1),
         }
 
 
@@ -170,10 +201,22 @@ class DeliveryAgent(CellAgent):
         if not success:
             return
 
+        points_delta = self.points - previous_points
+        outcome_meta = self.build_outcome_meta()
+        outcome_meta["points_delta"] = points_delta
+        outcome_meta["delivery_success"] = True
+        outcome_meta["failure_reason"] = None
+
         self.delivery_count += 1
+        self.model.record_delivery_event(
+            agent_id=self.unique_id,
+            outcome_status="success",
+            meta=outcome_meta,
+        )
         self._settle_current_interaction(
             outcome_status="success",
-            points_delta=self.points - previous_points,
+            points_delta=points_delta,
+            outcome_meta=outcome_meta,
         )
 
         self.prev_goal_name = self.goal_name
@@ -182,9 +225,20 @@ class DeliveryAgent(CellAgent):
 
 
     def _handle_bad_delivery_target(self) -> None:
+        outcome_meta = self.build_outcome_meta()
+        outcome_meta["points_delta"] = 0.0
+        outcome_meta["delivery_success"] = False
+        outcome_meta["failure_reason"] = "bad_delivery_target"
+
+        self.model.record_delivery_event(
+            agent_id=self.unique_id,
+            outcome_status="failure",
+            meta=outcome_meta,
+        )
         self._settle_current_interaction(
             outcome_status="failure",
             points_delta=0.0,
+            outcome_meta=outcome_meta,
         )
 
         if self.goal_name is not None:
@@ -194,11 +248,16 @@ class DeliveryAgent(CellAgent):
             self.internal_map.pop(self.target_coordinate, None)
 
 
-    def _settle_current_interaction(self, outcome_status: Literal["success", "failure"], points_delta: float) -> None:
+    def _settle_current_interaction(
+            self,
+            outcome_status: Literal["success", "failure"],
+            points_delta: float,
+            outcome_meta: dict | None = None,
+    ) -> None:
         if self.current_interaction_id is None:
             return
 
-        outcome_meta = self.build_outcome_meta()
+        outcome_meta = dict(outcome_meta) if outcome_meta is not None else self.build_outcome_meta()
         outcome_meta["points_delta"] = points_delta
 
         self.model.settle_interaction(
@@ -239,13 +298,23 @@ class DeliveryAgent(CellAgent):
 
 
     def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
+        self.last_share_target = target
+        self.last_share_coordinate = None
+        self.last_share_was_malicious = False
+        self.last_share_mode = "none"
+
         if target not in self.known_drop_offs:
+            self.last_share_mode = "blocked_unknown_target"
             return None
 
         if not self.verify_vtp(requester.unique_id, MAP_DATA_SERVICE):
+            self.last_share_mode = "blocked_untrusted_requester"
             return None
 
-        return self.known_drop_offs[target]
+        coordinate = self.known_drop_offs[target]
+        self.last_share_coordinate = coordinate
+        self.last_share_mode = "honest_known_coordinate"
+        return coordinate
 
 
     def perceive_env(self) -> None:
@@ -381,7 +450,26 @@ class DeliveryAgent(CellAgent):
             service_type=MAP_DATA_SERVICE,
             meta={
                 "goal_name": self.goal_name,
+                "requester_type": type(self).__name__,
+                "provider_type": response.get("provider_type"),
                 "shared_coordinate": response["coord"],
+                "shared_coord_x": response.get("shared_coord_x"),
+                "shared_coord_y": response.get("shared_coord_y"),
+                "true_coordinate": response.get("true_coordinate"),
+                "true_coord_x": response.get("true_coord_x"),
+                "true_coord_y": response.get("true_coord_y"),
+                "was_shared_coordinate_true": response.get("was_shared_coordinate_true"),
+                "provider_share_mode": response.get("provider_share_mode"),
+                "provider_share_was_malicious": response.get("provider_share_was_malicious"),
+                "provider_distance": response.get("provider_distance", response.get("dist")),
+                "response_rank_by_distance": response.get("response_rank_by_distance"),
+                "num_candidate_responses": response.get("num_candidate_responses"),
+                "provider_trust_score_at_request": response.get("provider_trust_score_at_request"),
+                "provider_total_active_at_request": response.get("provider_total_active_at_request"),
+                "provider_context_matching_active_at_request": response.get("provider_context_matching_active_at_request"),
+                "provider_other_active_at_request": response.get("provider_other_active_at_request"),
+                "requester_trust_score_at_request": response.get("requester_trust_score_at_request"),
+                "requester_total_active_at_request": response.get("requester_total_active_at_request"),
             },
         )
 
@@ -419,9 +507,22 @@ class MaliciousMapDeliveryAgent(DeliveryAgent):
 
     @override
     def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
-        # if self.model.calc_global_trust(self.unique_id) >= 0.5 and self.random.random() <= self.maliciousness:
+        self.last_share_target = target
+        self.last_share_coordinate = None
+        self.last_share_was_malicious = False
+        self.last_share_mode = "none"
+
+        # A malicious agent can only weaponize a response when the requester trusts it.
+        # Otherwise, fall back to the normal share_map logic, which may block the response.
         if self.verify_vtp(requester.unique_id):
             if self.random.random() <= self.maliciousness:
-                return self.random.randint(0, self.model.grid.width-1), self.random.randint(0, self.model.grid.height-1)
+                coordinate = (
+                    self.random.randint(0, self.model.grid.width - 1),
+                    self.random.randint(0, self.model.grid.height - 1),
+                )
+                self.last_share_coordinate = coordinate
+                self.last_share_was_malicious = True
+                self.last_share_mode = "malicious_random_coordinate"
+                return coordinate
 
         return super().share_map(requester, target)
