@@ -16,6 +16,9 @@ ENV_DROP_OFF = "drop_off"
 SOURCE_SELF = "self"
 MAP_DATA_SERVICE = "map_data"
 
+DEFAULT_TRUST_REJECT_THRESHOLD = 0.30
+DEFAULT_TRUST_ACCEPT_THRESHOLD = 0.80
+
 
 class Package(TypedDict):
     destination: str
@@ -30,13 +33,22 @@ class MapRecord(TypedDict):
 
 
 class DeliveryAgent(CellAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, trust_threshold: float=1.0) -> None:
+    def __init__(
+        self,
+        model: mesa.Model,
+        cell: mesa.discrete_space.Cell,
+        vision_radius: int,
+        trust_reject_threshold: float = DEFAULT_TRUST_REJECT_THRESHOLD,
+        trust_accept_threshold: float = DEFAULT_TRUST_ACCEPT_THRESHOLD,
+    ) -> None:
         """
         An agent that delivers packages to drop-off locations. Can share map data with other agents.
 
         :param model: The mesa model.
         :param cell: The cell on which the agent spawns.
         :param vision_radius: The vision radius.
+        :param trust_reject_threshold: Score at or below which this agent always rejects trust.
+        :param trust_accept_threshold: Score at or above which this agent always accepts trust.
         """
 
         super().__init__(model)
@@ -54,7 +66,14 @@ class DeliveryAgent(CellAgent):
         self.current_interaction_id: str | None = None
 
         self.vision_radius = vision_radius
-        self.trust_threshold = trust_threshold
+        self.trust_reject_threshold = trust_reject_threshold
+        self.trust_accept_threshold = trust_accept_threshold
+
+        if not 0.0 <= self.trust_reject_threshold < self.trust_accept_threshold <= 1.0:
+            raise ValueError(
+                "Trust thresholds must satisfy "
+                "0.0 <= reject_threshold < accept_threshold <= 1.0."
+            )
         self.points = 0.0
         self.delivery_count = 0
         self._all_possible_coords = model.all_coordinates
@@ -66,7 +85,6 @@ class DeliveryAgent(CellAgent):
         self.last_share_was_malicious = False
         self.last_share_coordinate: Coordinate | None = None
         self.last_share_target: str | None = None
-
 
     @property
     def map_size(self) -> int:
@@ -80,11 +98,23 @@ class DeliveryAgent(CellAgent):
     def steps_on_package(self) -> int:
         return self.package["steps_taken"] if self.package else 0
 
-
-    def verify_vtp(self, target_id: str, service_type: str="map_data") -> bool:
+    def verify_vtp(self, target_id: str, service_type: str = MAP_DATA_SERVICE) -> bool:
         summary = self.model.get_vtp_summary(target_id, service_type)
-        return summary["score"] >= self.trust_threshold
+        return self._accepts_trust_score(summary["score"])
 
+    def _accepts_trust_score(self, score: float) -> bool:
+        """Decide whether this agent accepts another agent's ledger-derived score."""
+        if score <= self.trust_reject_threshold:
+            return False
+
+        if score >= self.trust_accept_threshold:
+            return True
+
+        acceptance_probability = (score - self.trust_reject_threshold) / (
+            self.trust_accept_threshold - self.trust_reject_threshold
+        )
+
+        return self.random.random() <= acceptance_probability
 
     def build_outcome_meta(self) -> dict:
         true_goal_coordinate = self.model.get_drop_off_coordinate(self.goal_name)
@@ -97,8 +127,12 @@ class DeliveryAgent(CellAgent):
             "target_x": target_coordinate[0] if target_coordinate is not None else None,
             "target_y": target_coordinate[1] if target_coordinate is not None else None,
             "true_goal_coordinate": true_goal_coordinate,
-            "true_goal_x": true_goal_coordinate[0] if true_goal_coordinate is not None else None,
-            "true_goal_y": true_goal_coordinate[1] if true_goal_coordinate is not None else None,
+            "true_goal_x": (
+                true_goal_coordinate[0] if true_goal_coordinate is not None else None
+            ),
+            "true_goal_y": (
+                true_goal_coordinate[1] if true_goal_coordinate is not None else None
+            ),
             "target_is_true_goal": target_coordinate == true_goal_coordinate,
             "ended_on_coordinate": ended_on_coordinate,
             "ended_x": ended_on_coordinate[0],
@@ -137,7 +171,6 @@ class DeliveryAgent(CellAgent):
             "delivery_efficiency": min_steps / max(steps_taken, 1),
         }
 
-
     def move(self) -> bool:
         """
         Move one step toward the current target coordinate.
@@ -156,7 +189,6 @@ class DeliveryAgent(CellAgent):
 
         return moved
 
-
     def _move_one_step_towards_target(self) -> bool:
         if self.target_coordinate is None:
             return False
@@ -173,7 +205,6 @@ class DeliveryAgent(CellAgent):
         self.move_relative((dx, dy))
         return True
 
-
     def _handle_target_reached(self) -> None:
         if self.state == STATE_DELIVERING:
             if self._goal_drop_off_is_on_current_cell():
@@ -183,13 +214,11 @@ class DeliveryAgent(CellAgent):
 
         self._clear_current_target()
 
-
     def _goal_drop_off_is_on_current_cell(self) -> bool:
         if self.goal_name is None:
             return False
 
         return any(agent.unique_id == self.goal_name for agent in self.cell.agents)
-
 
     def _complete_delivery(self) -> None:
         if self.package is None:
@@ -223,7 +252,6 @@ class DeliveryAgent(CellAgent):
         self.goal_name = None
         self.package = None
 
-
     def _handle_bad_delivery_target(self) -> None:
         outcome_meta = self.build_outcome_meta()
         outcome_meta["points_delta"] = 0.0
@@ -247,17 +275,20 @@ class DeliveryAgent(CellAgent):
         if self.target_coordinate is not None:
             self.internal_map.pop(self.target_coordinate, None)
 
-
     def _settle_current_interaction(
-            self,
-            outcome_status: Literal["success", "failure"],
-            points_delta: float,
-            outcome_meta: dict | None = None,
+        self,
+        outcome_status: Literal["success", "failure"],
+        points_delta: float,
+        outcome_meta: dict | None = None,
     ) -> None:
         if self.current_interaction_id is None:
             return
 
-        outcome_meta = dict(outcome_meta) if outcome_meta is not None else self.build_outcome_meta()
+        outcome_meta = (
+            dict(outcome_meta)
+            if outcome_meta is not None
+            else self.build_outcome_meta()
+        )
         outcome_meta["points_delta"] = points_delta
 
         self.model.settle_interaction(
@@ -267,15 +298,19 @@ class DeliveryAgent(CellAgent):
             outcome_meta=outcome_meta,
         )
 
-
     def _clear_current_target(self) -> None:
         self.state = STATE_IDLE
         self.target_coordinate = None
         self.current_provider_id = None
         self.current_interaction_id = None
 
-
-    def update_internal_map(self, coordinate: Coordinate, env_type: str, info_source: str = SOURCE_SELF,drop_off_name: str | None = None) -> None:
+    def update_internal_map(
+        self,
+        coordinate: Coordinate,
+        env_type: str,
+        info_source: str = SOURCE_SELF,
+        drop_off_name: str | None = None,
+    ) -> None:
         """
         Update the agent's internal map.
 
@@ -296,7 +331,6 @@ class DeliveryAgent(CellAgent):
         if drop_off_name is not None:
             self.known_drop_offs[drop_off_name] = coordinate
 
-
     def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
         self.last_share_target = target
         self.last_share_coordinate = None
@@ -316,22 +350,31 @@ class DeliveryAgent(CellAgent):
         self.last_share_mode = "honest_known_coordinate"
         return coordinate
 
-
     def perceive_env(self) -> None:
         """
         Check area visible in vision range and update internal map.
         """
 
-        visible_area = self.cell.get_neighborhood(include_center=True,radius=self.vision_radius).cells
+        visible_area = self.cell.get_neighborhood(
+            include_center=True, radius=self.vision_radius
+        ).cells
 
         for cell in visible_area:
-            drop_off = next((agent for agent in cell.agents if isinstance(agent, DropOffLocationAgent)),None)
+            drop_off = next(
+                (
+                    agent
+                    for agent in cell.agents
+                    if isinstance(agent, DropOffLocationAgent)
+                ),
+                None,
+            )
 
             if drop_off is not None:
-                self.update_internal_map(cell.coordinate, ENV_DROP_OFF, drop_off_name=drop_off.unique_id)
+                self.update_internal_map(
+                    cell.coordinate, ENV_DROP_OFF, drop_off_name=drop_off.unique_id
+                )
             else:
                 self.update_internal_map(cell.coordinate, ENV_FLOOR)
-
 
     def receive_package(self, package: Package) -> None:
         """
@@ -343,8 +386,7 @@ class DeliveryAgent(CellAgent):
         self.goal_name = self.package["destination"]
         self.package["steps_taken"] = 0
 
-
-    def select_unexplored_coordinate(self) -> Coordinate|None:
+    def select_unexplored_coordinate(self) -> Coordinate | None:
         """
         Randomly select an unexplored coordinate.
         If there are no unexplored coordinates, return None.
@@ -359,7 +401,6 @@ class DeliveryAgent(CellAgent):
         if not unexplored_coordinates:
             return None
         return self.random.choice(unexplored_coordinates)
-
 
     def step(self) -> None:
         self.perceive_env()
@@ -381,14 +422,11 @@ class DeliveryAgent(CellAgent):
         if self.target_coordinate is not None:
             self.move()
 
-
     def _has_active_package(self) -> bool:
         return self.goal_name is not None and self.package is not None
 
-
     def _knows_goal_location(self) -> bool:
         return self.goal_name is not None and self.goal_name in self.known_drop_offs
-
 
     def _start_delivering_to_known_goal(self) -> None:
         if self.goal_name is None:
@@ -396,7 +434,6 @@ class DeliveryAgent(CellAgent):
 
         self.target_coordinate = self.known_drop_offs[self.goal_name]
         self.state = STATE_DELIVERING
-
 
     def _should_search_for_goal_location(self) -> bool:
         if self.state == STATE_IDLE:
@@ -406,10 +443,9 @@ class DeliveryAgent(CellAgent):
             return False
 
         return (
-                self.target_coordinate is None
-                or self.target_coordinate in self.internal_map
+            self.target_coordinate is None
+            or self.target_coordinate in self.internal_map
         )
-
 
     def _try_get_goal_location_from_other_agent(self) -> bool:
         if self.goal_name is None:
@@ -422,7 +458,6 @@ class DeliveryAgent(CellAgent):
                 return True
 
         return False
-
 
     def _accept_map_response(self, response: dict[str, Any]) -> bool:
         if self.goal_name is None:
@@ -458,28 +493,70 @@ class DeliveryAgent(CellAgent):
                 "true_coordinate": response.get("true_coordinate"),
                 "true_coord_x": response.get("true_coord_x"),
                 "true_coord_y": response.get("true_coord_y"),
-                "was_shared_coordinate_true": response.get("was_shared_coordinate_true"),
+                "was_shared_coordinate_true": response.get(
+                    "was_shared_coordinate_true"
+                ),
                 "provider_share_mode": response.get("provider_share_mode"),
-                "provider_share_was_malicious": response.get("provider_share_was_malicious"),
-                "provider_distance": response.get("provider_distance", response.get("dist")),
+                "provider_share_was_malicious": response.get(
+                    "provider_share_was_malicious"
+                ),
+                "provider_distance": response.get(
+                    "provider_distance", response.get("dist")
+                ),
                 "response_rank_by_distance": response.get("response_rank_by_distance"),
                 "num_candidate_responses": response.get("num_candidate_responses"),
-                "provider_trust_score_at_request": response.get("provider_trust_score_at_request"),
-                "provider_total_active_at_request": response.get("provider_total_active_at_request"),
-                "provider_context_matching_active_at_request": response.get("provider_context_matching_active_at_request"),
-                "provider_other_active_at_request": response.get("provider_other_active_at_request"),
-                "requester_trust_score_at_request": response.get("requester_trust_score_at_request"),
-                "requester_total_active_at_request": response.get("requester_total_active_at_request"),
+                "provider_trust_score_at_request": response.get(
+                    "provider_trust_score_at_request"
+                ),
+                "provider_total_active_at_request": response.get(
+                    "provider_total_active_at_request"
+                ),
+                "provider_context_matching_active_at_request": response.get(
+                    "provider_context_matching_active_at_request"
+                ),
+                "provider_other_active_at_request": response.get(
+                    "provider_other_active_at_request"
+                ),
+                "requester_trust_score_at_request": response.get(
+                    "requester_trust_score_at_request"
+                ),
+                "requester_total_active_at_request": response.get(
+                    "requester_total_active_at_request"
+                ),
+                "provider_total_burned_at_request": response.get(
+                    "provider_total_burned_at_request"
+                ),
+                "provider_context_matching_burned_at_request": response.get(
+                    "provider_context_matching_burned_at_request"
+                ),
+                "provider_other_burned_at_request": response.get(
+                    "provider_other_burned_at_request"
+                ),
+                "provider_weighted_active_at_request": response.get(
+                    "provider_weighted_active_at_request"
+                ),
+                "provider_weighted_burned_at_request": response.get(
+                    "provider_weighted_burned_at_request"
+                ),
+                "requester_total_burned_at_request": response.get(
+                    "requester_total_burned_at_request"
+                ),
+                "requester_weighted_active_at_request": response.get(
+                    "requester_weighted_active_at_request"
+                ),
+                "requester_weighted_burned_at_request": response.get(
+                    "requester_weighted_burned_at_request"
+                ),
             },
         )
 
         return True
 
-
     def _start_exploring(self) -> None:
         self.target_coordinate = self.select_unexplored_coordinate()
-        self.state = STATE_EXPLORING if self.target_coordinate is not None else STATE_IDLE
-
+        self.state = (
+            STATE_EXPLORING if self.target_coordinate is not None else STATE_IDLE
+        )
 
 
 class DropOffLocationAgent(FixedAgent):
@@ -499,30 +576,53 @@ class DropOffLocationAgent(FixedAgent):
         self.global_rep = None
 
 
-
 class MaliciousMapDeliveryAgent(DeliveryAgent):
-    def __init__(self, model: mesa.Model, cell: mesa.discrete_space.Cell, vision_radius: int, trust_threshold: float=1.0, maliciousness: float=0.5) -> None:
-        super().__init__(model, cell, vision_radius, trust_threshold)
+    def __init__(
+        self,
+        model: mesa.Model,
+        cell: mesa.discrete_space.Cell,
+        vision_radius: int,
+        trust_reject_threshold: float = DEFAULT_TRUST_REJECT_THRESHOLD,
+        trust_accept_threshold: float = DEFAULT_TRUST_ACCEPT_THRESHOLD,
+        maliciousness: float = 0.5,
+    ) -> None:
+        super().__init__(
+            model,
+            cell,
+            vision_radius,
+            trust_reject_threshold,
+            trust_accept_threshold,
+        )
         self.maliciousness = maliciousness
 
     @override
-    def share_map(self, requester: CellAgent, target: str) -> None | tuple[int, int]:
+    def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
         self.last_share_target = target
         self.last_share_coordinate = None
         self.last_share_was_malicious = False
         self.last_share_mode = "none"
 
-        # A malicious agent can only weaponize a response when the requester trusts it.
-        # Otherwise, fall back to the normal share_map logic, which may block the response.
-        if self.verify_vtp(requester.unique_id):
-            if self.random.random() <= self.maliciousness:
-                coordinate = (
-                    self.random.randint(0, self.model.grid.width - 1),
-                    self.random.randint(0, self.model.grid.height - 1),
-                )
-                self.last_share_coordinate = coordinate
-                self.last_share_was_malicious = True
-                self.last_share_mode = "malicious_random_coordinate"
-                return coordinate
+        if target not in self.known_drop_offs:
+            self.last_share_mode = "blocked_unknown_target"
+            return None
 
-        return super().share_map(requester, target)
+        if not self.verify_vtp(requester.unique_id, MAP_DATA_SERVICE):
+            self.last_share_mode = "blocked_untrusted_requester"
+            return None
+
+        # A trusted requester can be exploited; otherwise the response is honest.
+        # This avoids rolling the grey-zone trust decision twice.
+        if self.random.random() <= self.maliciousness:
+            coordinate = (
+                self.random.randint(0, self.model.grid.width - 1),
+                self.random.randint(0, self.model.grid.height - 1),
+            )
+            self.last_share_coordinate = coordinate
+            self.last_share_was_malicious = True
+            self.last_share_mode = "malicious_random_coordinate"
+            return coordinate
+
+        coordinate = self.known_drop_offs[target]
+        self.last_share_coordinate = coordinate
+        self.last_share_mode = "honest_known_coordinate"
+        return coordinate
