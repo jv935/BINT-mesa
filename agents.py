@@ -576,7 +576,7 @@ class DropOffLocationAgent(FixedAgent):
         self.global_rep = None
 
 
-class MaliciousMapDeliveryAgent(DeliveryAgent):
+class MaliciousDeliveryAgent(DeliveryAgent):
     def __init__(
         self,
         model: mesa.Model,
@@ -584,7 +584,10 @@ class MaliciousMapDeliveryAgent(DeliveryAgent):
         vision_radius: int,
         trust_reject_threshold: float = DEFAULT_TRUST_REJECT_THRESHOLD,
         trust_accept_threshold: float = DEFAULT_TRUST_ACCEPT_THRESHOLD,
-        maliciousness: float = 0.5,
+        maliciousness: float | None = 0.5,
+        false_map_probability: float | None = None,
+        false_negative_review_probability: float | None = None,
+        false_positive_review_probability: float | None = None,
     ) -> None:
         super().__init__(
             model,
@@ -593,7 +596,31 @@ class MaliciousMapDeliveryAgent(DeliveryAgent):
             trust_reject_threshold,
             trust_accept_threshold,
         )
-        self.maliciousness = maliciousness
+
+        self.maliciousness = (
+            None
+            if maliciousness is None
+            else self._validate_probability(maliciousness, "maliciousness")
+        )
+
+        if self.maliciousness is not None:
+            self.false_map_probability = self.maliciousness
+            self.false_negative_review_probability = self.maliciousness
+            self.false_positive_review_probability = self.maliciousness
+        else:
+            self.false_map_probability = self._validate_probability(
+                false_map_probability, "false_map_probability"
+            )
+            self.false_negative_review_probability = self._validate_probability(
+                false_negative_review_probability, "false_negative_review_probability"
+            )
+            self.false_positive_review_probability = self._validate_probability(
+                false_positive_review_probability, "false_positive_review_probability"
+            )
+
+            self.false_map_probability = false_map_probability
+            self.false_negative_review_probability = false_negative_review_probability
+            self.false_positive_review_probability = false_positive_review_probability
 
     @override
     def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
@@ -602,27 +629,43 @@ class MaliciousMapDeliveryAgent(DeliveryAgent):
         self.last_share_was_malicious = False
         self.last_share_mode = "none"
 
-        if target not in self.known_drop_offs:
-            self.last_share_mode = "blocked_unknown_target"
-            return None
+        # if the target coordinates are not known
+        # if target not in self.known_drop_offs:
+        #     self.last_share_mode = "blocked_unknown_target"
+        #     return None
 
+        # if the requester is not trusted
         if not self.verify_vtp(requester.unique_id, MAP_DATA_SERVICE):
             self.last_share_mode = "blocked_untrusted_requester"
             return None
 
-        # A trusted requester can be exploited; otherwise the response is honest.
-        # This avoids rolling the grey-zone trust decision twice.
-        if self.random.random() <= self.maliciousness:
+        if self._draw_probability(self.false_map_probability):
             coordinate = (
                 self.random.randint(0, self.model.grid.width - 1),
                 self.random.randint(0, self.model.grid.height - 1),
             )
+
+            # more logging stuff
             self.last_share_coordinate = coordinate
             self.last_share_was_malicious = True
             self.last_share_mode = "malicious_random_coordinate"
+
             return coordinate
 
         coordinate = self.known_drop_offs[target]
         self.last_share_coordinate = coordinate
         self.last_share_mode = "honest_known_coordinate"
+
         return coordinate
+
+    @staticmethod
+    def _validate_probability(value: float, name: str) -> float:
+        value = float(value)
+
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} probability must be between 0.0 and 1.0")
+
+        return value
+
+    def _draw_probability(self, probability: float) -> bool:
+        return self.random().random() <= probability
