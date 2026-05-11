@@ -5,6 +5,7 @@ from typing import Any, Literal, TypedDict
 
 Coordinate = tuple[int, int]
 AgentState = Literal["IDLE", "EXPLORING", "DELIVERING"]
+ReportedOutcomeStatus = Literal["success", "failure"]
 
 STATE_IDLE = "IDLE"
 STATE_EXPLORING = "EXPLORING"
@@ -275,9 +276,26 @@ class DeliveryAgent(CellAgent):
         if self.target_coordinate is not None:
             self.internal_map.pop(self.target_coordinate, None)
 
+    def decide_reported_outcome(
+        self, actual_outcome_status: ReportedOutcomeStatus, outcome_meta: dict[str, Any]
+    ) -> tuple[ReportedOutcomeStatus, dict[str, Any]]:
+        review_meta = dict(outcome_meta)
+        review_meta.update(
+            {
+                "actual_outcome_status": actual_outcome_status,
+                "reported_outcome_status": actual_outcome_status,
+                "review_was_false": False,
+                "review_mode": "honest_review",
+                "reviewer_id": self.unique_id,
+                "reviewer_type": type(self).__name__,
+            }
+        )
+
+        return actual_outcome_status, review_meta
+
     def _settle_current_interaction(
         self,
-        outcome_status: Literal["success", "failure"],
+        outcome_status: ReportedOutcomeStatus,
         points_delta: float,
         outcome_meta: dict | None = None,
     ) -> None:
@@ -291,11 +309,15 @@ class DeliveryAgent(CellAgent):
         )
         outcome_meta["points_delta"] = points_delta
 
+        reported_outcome_status, reported_outcome_meta = self.decide_reported_outcome(
+            actual_outcome_status=outcome_status, outcome_meta=outcome_meta
+        )
+
         self.model.settle_interaction(
             interaction_id=self.current_interaction_id,
             evaluator_id=self.unique_id,
-            outcome_status=outcome_status,
-            outcome_meta=outcome_meta,
+            outcome_status=reported_outcome_status,
+            outcome_meta=reported_outcome_meta,
         )
 
     def _clear_current_target(self) -> None:
@@ -657,6 +679,44 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         self.last_share_mode = "honest_known_coordinate"
 
         return coordinate
+
+    @override
+    def decide_reported_outcome(
+        self, actual_outcome_status: ReportedOutcomeStatus, outcome_meta: dict[str, Any]
+    ) -> tuple[ReportedOutcomeStatus, dict[str, Any]]:
+        reported_outcome_status = actual_outcome_status
+        review_was_false = False
+        review_mode = "honest_review"
+
+        if actual_outcome_status == "success" and self._draw_probability(
+            self.false_negative_review_probability
+        ):
+            reported_outcome_status = "failure"
+            review_was_false = True
+            review_mode = "false_negative_review"
+
+        elif actual_outcome_status == "failure" and self._draw_probability(
+            self.false_positive_review_probability
+        ):
+            reported_outcome_status = "success"
+            review_was_false = True
+            review_mode = "false_positive_review"
+
+        review_meta = dict(outcome_meta)
+        review_meta.update(
+            {
+                "actual_outcome_status": actual_outcome_status,
+                "reported_outcome_status": reported_outcome_status,
+                "review_was_false": review_was_false,
+                "review_mode": review_mode,
+                "reviewer_id": self.unique_id,
+                "reviewer_type": type(self).__name__,
+                "false_negative_review_probability": self.false_negative_review_probability,
+                "false_positive_review_probability": self.false_positive_review_probability,
+            }
+        )
+
+        return reported_outcome_status, review_meta
 
     @staticmethod
     def _validate_probability(value: float, name: str) -> float:
