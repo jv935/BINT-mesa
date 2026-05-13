@@ -3,15 +3,9 @@ from mesa.discrete_space import OrthogonalMooreGrid
 from dataclasses import dataclass, field
 from typing import Literal, Any
 from agents import (
-    DEFAULT_TRUST_ACCEPT_THRESHOLD,
-    DEFAULT_TRUST_REJECT_THRESHOLD,
     DeliveryAgent,
     DropOffLocationAgent,
-    MaliciousMapDeliveryAgent,
-)
-from instrumentation import (
-    build_data_collector,
-    export_end_of_run_data as write_end_of_run_data,
+    MaliciousDeliveryAgent,
 )
 
 Coordinate = tuple[int, int]
@@ -20,7 +14,6 @@ OutcomeStatus = Literal["success", "failure", "disputed"]
 
 MAP_DATA_SERVICE = "map_data"
 SYSTEM_ISSUER_ID = "SYSTEM"
-EXPORT_DIR = "exports"
 
 # Trust uses a bounded Beta-style score:
 # active TNFTs are positive evidence, burned TNFTs are negative evidence.
@@ -55,27 +48,39 @@ class OutcomeRecord:
     timestamp: float = 0.0
 
 
+@dataclass
+class AgentProfile:
+    agent_class: type[DeliveryAgent]
+    count: int
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.count = int(self.count)
+
+        if self.count < 0:
+            raise ValueError("AgentProfile: count must be greater than or equal to 0.")
+
+        if not issubclass(self.agent_class, DeliveryAgent):
+            raise TypeError(
+                "AgentProfile: agent_class must be a DeliveryAgent subclass."
+            )
+
+        if not isinstance(self.kwargs, dict):
+            raise TypeError("AgentProfile: kwargs must be a dictionary.")
+
+
 class BintWorldModel(mesa.Model):
     """Mesa simulation for BINT."""
 
     def __init__(
         self,
         num_drop_offs: int = 5,
-        agent_counts: dict[type, int] | None = None,
-        num_delivery: int = 5,
-        num_map_malicious: int = 2,
+        agent_profiles: list[AgentProfile] | None = None,
         size: Coordinate | None = None,
         width: int = 100,
         height: int = 100,
-        agent_vision_radius: int = 2,
-        trust_reject_threshold: float = DEFAULT_TRUST_REJECT_THRESHOLD,
-        trust_accept_threshold: float = DEFAULT_TRUST_ACCEPT_THRESHOLD,
         genesis_tokens: int = 1,
-        maliciousness_prob: float = 0.5,
-        max_steps: int = 1000,
-        scenario_name: str = "default",
-        scenario_family: str = "default",
-        export_dir: str = EXPORT_DIR,
+        max_steps: int = 1500,
         rng: int | str | None = None,
     ) -> None:
 
@@ -85,30 +90,23 @@ class BintWorldModel(mesa.Model):
         self.size = size if size is not None else (width, height)
         self.width, self.height = self.size
         self.max_steps = int(max_steps)
-        self.scenario_name = str(scenario_name)
-        self.scenario_family = str(scenario_family)
-        self.export_dir = str(export_dir)
 
         self.num_drop_offs = int(num_drop_offs)
-        self.agent_vision_radius = int(agent_vision_radius)
-        self.trust_reject_threshold = float(trust_reject_threshold)
-        self.trust_accept_threshold = float(trust_accept_threshold)
-        self.trust_threshold = (
-            self.trust_accept_threshold
-        )  # Legacy name for older reporting helpers.
         self.genesis_tokens = int(genesis_tokens)
-        self.maliciousness_prob = float(maliciousness_prob)
 
-        self.agent_counts = self._normalise_agent_counts(
-            agent_counts=agent_counts,
-            num_delivery=num_delivery,
-            num_map_malicious=num_map_malicious,
+        # use defaults if none are provided
+        if agent_profiles is None:
+            self.agent_profiles = [
+                AgentProfile(DeliveryAgent, 7),
+                AgentProfile(MaliciousDeliveryAgent, 3),
+            ]
+        else:
+            self.agent_profiles = agent_profiles
+
+        self.total_delivery_agents = sum(
+            profile.count for profile in self.agent_profiles
         )
-        self.num_delivery = self.agent_counts.get(DeliveryAgent, 0)
-        self.num_map_malicious = self.agent_counts.get(MaliciousMapDeliveryAgent, 0)
-        self.total_delivery_agents = sum(self.agent_counts.values())
 
-        self._validate_configuration()
         self._create_grid()
         self._initialise_ledger_and_records()
         self._spawn_agents()
@@ -118,50 +116,11 @@ class BintWorldModel(mesa.Model):
         self.dispatch_packages()
         self.seed_genesis_tnfts()
 
-        self._initialise_data_collection()
-
     @staticmethod
     def _normalise_rng_seed(rng: int | str | None) -> int | None:
         if rng is None or rng == "":
             return None
         return int(rng)
-
-    @staticmethod
-    def _normalise_agent_counts(
-        agent_counts: dict[type, int] | None,
-        num_delivery: int,
-        num_map_malicious: int,
-    ) -> dict[type, int]:
-        if agent_counts is None:
-            agent_counts = {
-                DeliveryAgent: num_delivery,
-                MaliciousMapDeliveryAgent: num_map_malicious,
-            }
-
-        return {agent_class: int(count) for agent_class, count in agent_counts.items()}
-
-    def _validate_configuration(self) -> None:
-        if self.width <= 0 or self.height <= 0:
-            raise ValueError("Grid width and height must be positive.")
-        if self.num_drop_offs < 1:
-            raise ValueError("num_drop_offs must be >= 1.")
-        if self.agent_vision_radius < 0:
-            raise ValueError("agent_vision_radius must be >= 0.")
-        if not 0.0 <= self.trust_reject_threshold < self.trust_accept_threshold <= 1.0:
-            raise ValueError(
-                "Trust thresholds must satisfy "
-                "0.0 <= reject_threshold < accept_threshold <= 1.0."
-            )
-        if any(count < 0 for count in self.agent_counts.values()):
-            raise ValueError("Agent counts must be non-negative.")
-
-        total_cells = self.width * self.height
-        required_cells = self.num_drop_offs + self.total_delivery_agents
-
-        if required_cells > total_cells:
-            raise ValueError(
-                f"Configuration needs {required_cells} distinct cells, but grid only has {total_cells}."
-            )
 
     def _create_grid(self) -> None:
         self.grid = OrthogonalMooreGrid(self.size, torus=False, random=self.random)
@@ -180,29 +139,19 @@ class BintWorldModel(mesa.Model):
         self.interaction_counter = 0
         self.interactions: dict[str, InteractionRecord] = {}
         self.outcomes: dict[str, OutcomeRecord] = {}
-        self.delivery_events: list[dict[str, Any]] = []
 
     def _spawn_agents(self) -> None:
         spawn_index = 0
 
-        for agent_class, count in self.agent_counts.items():
+        for profile in self.agent_profiles:
+            count = int(profile.count)
+
             if count <= 0:
                 continue
 
             cells = self.agent_spawn_cells[spawn_index : spawn_index + count]
-            common_args = [
-                self,
-                count,
-                cells,
-                self.agent_vision_radius,
-                self.trust_reject_threshold,
-                self.trust_accept_threshold,
-            ]
 
-            if agent_class is MaliciousMapDeliveryAgent:
-                agent_class.create_agents(*common_args, self.maliciousness_prob)
-            else:
-                agent_class.create_agents(*common_args)
+            profile.agent_class.create_agents(self, count, cells, **profile.kwargs)
 
             spawn_index += count
 
@@ -217,10 +166,6 @@ class BintWorldModel(mesa.Model):
         self.cached_delivery_agents = [
             agent for agent in self.agents if isinstance(agent, DeliveryAgent)
         ]
-
-    def _initialise_data_collection(self) -> None:
-        self.datacollector = build_data_collector()
-        self.datacollector.collect(self)
 
     def record_interaction(
         self,
@@ -540,46 +485,10 @@ class BintWorldModel(mesa.Model):
         )
         return drop_off.cell.coordinate if drop_off is not None else None
 
-    def is_true_drop_off_coordinate(
-        self, drop_off_name: str | None, coordinate: Coordinate | None
-    ) -> bool:
-        true_coordinate = self.get_drop_off_coordinate(drop_off_name)
-
-        if true_coordinate is None or coordinate is None:
-            return False
-
-        return tuple(coordinate) == tuple(true_coordinate)
-
-    def record_delivery_event(
-        self,
-        agent_id: str,
-        outcome_status: OutcomeStatus,
-        meta: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        agent = self._find_delivery_agent(agent_id)
-
-        if agent is None:
-            return None
-
-        event_id = f"delivery_{len(self.delivery_events) + 1}"
-        event = {
-            "delivery_event_id": event_id,
-            "timestamp": self.time,
-            "agent_id": agent_id,
-            "agent_type": type(agent).__name__,
-            "outcome_status": outcome_status,
-            "provider_id": getattr(agent, "current_provider_id", None),
-            "interaction_id": getattr(agent, "current_interaction_id", None),
-            "meta": meta or {},
-        }
-        self.delivery_events.append(event)
-        return event
-
     def request_map_data(
         self, requester: DeliveryAgent, target_name: str
     ) -> list[dict[str, Any]]:
         responses = []
-        true_coordinate = self.get_drop_off_coordinate(target_name)
 
         for agent in self.cached_delivery_agents:
             if agent == requester:
@@ -591,92 +500,19 @@ class BintWorldModel(mesa.Model):
                 if agent_resp is None:
                     continue
 
-                provider_summary = self.get_vtp_summary(
-                    agent.unique_id, MAP_DATA_SERVICE
-                )
-                requester_summary = self.get_vtp_summary(
-                    requester.unique_id, MAP_DATA_SERVICE
-                )
                 provider_distance = self.chebyshev_distance(
                     requester.cell.coordinate, agent.cell.coordinate
                 )
 
                 responses.append(
                     {
-                        # Keep these legacy keys because DeliveryAgent currently consumes them.
                         "agent": agent.unique_id,
                         "dist": provider_distance,
                         "coord": agent_resp,
-                        # Rich evaluation metadata.
-                        "requester_id": requester.unique_id,
-                        "requester_type": type(requester).__name__,
-                        "provider_id": agent.unique_id,
-                        "provider_type": type(agent).__name__,
-                        "target_name": target_name,
-                        "shared_coordinate": agent_resp,
-                        "shared_coord_x": agent_resp[0],
-                        "shared_coord_y": agent_resp[1],
-                        "true_coordinate": true_coordinate,
-                        "true_coord_x": (
-                            true_coordinate[0] if true_coordinate is not None else None
-                        ),
-                        "true_coord_y": (
-                            true_coordinate[1] if true_coordinate is not None else None
-                        ),
-                        "was_shared_coordinate_true": self.is_true_drop_off_coordinate(
-                            target_name, agent_resp
-                        ),
-                        "provider_distance": provider_distance,
-                        "provider_share_mode": getattr(agent, "last_share_mode", ""),
-                        "provider_share_was_malicious": bool(
-                            getattr(agent, "last_share_was_malicious", False)
-                        ),
-                        "provider_trust_score_at_request": provider_summary["score"],
-                        "provider_total_active_at_request": provider_summary[
-                            "total_active"
-                        ],
-                        "provider_context_matching_active_at_request": provider_summary[
-                            "context_matching_active"
-                        ],
-                        "provider_other_active_at_request": provider_summary[
-                            "other_active"
-                        ],
-                        "requester_trust_score_at_request": requester_summary["score"],
-                        "requester_total_active_at_request": requester_summary[
-                            "total_active"
-                        ],
-                        "provider_total_burned_at_request": provider_summary[
-                            "total_burned"
-                        ],
-                        "provider_context_matching_burned_at_request": provider_summary[
-                            "context_matching_burned"
-                        ],
-                        "provider_other_burned_at_request": provider_summary[
-                            "other_burned"
-                        ],
-                        "provider_weighted_active_at_request": provider_summary[
-                            "weighted_active"
-                        ],
-                        "provider_weighted_burned_at_request": provider_summary[
-                            "weighted_burned"
-                        ],
-                        "requester_total_burned_at_request": requester_summary[
-                            "total_burned"
-                        ],
-                        "requester_weighted_active_at_request": requester_summary[
-                            "weighted_active"
-                        ],
-                        "requester_weighted_burned_at_request": requester_summary[
-                            "weighted_burned"
-                        ],
                     }
                 )
 
         responses = sorted(responses, key=lambda response: response["dist"])
-
-        for rank, response in enumerate(responses, start=1):
-            response["response_rank_by_distance"] = rank
-            response["num_candidate_responses"] = len(responses)
 
         return responses
 
@@ -776,10 +612,3 @@ class BintWorldModel(mesa.Model):
     def step(self) -> None:
         self.agents.shuffle_do("step")
         self.dispatch_packages()
-        self.datacollector.collect(self)
-
-        if self.steps == self.max_steps:
-            self.export_end_of_run_data()
-
-    def export_end_of_run_data(self) -> None:
-        write_end_of_run_data(self)
