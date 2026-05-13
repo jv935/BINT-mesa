@@ -34,6 +34,8 @@ class DeliveryAgent(CellAgent):
         vision_radius: int = 1,
         trust_reject_threshold: float = 0.3,
         trust_accept_threshold: float = 0.8,
+        max_negative_review_rate: float = 0.6,
+        min_reviews_before_reviewer_check: int = 3,
     ) -> None:
         """
         An agent that delivers packages to drop-off locations. Can share map data with other agents.
@@ -68,6 +70,16 @@ class DeliveryAgent(CellAgent):
                 "Trust thresholds must satisfy "
                 "0.0 <= reject_threshold < accept_threshold <= 1.0."
             )
+
+        self.max_negative_review_rate = self._validate_probability(
+            max_negative_review_rate,
+            "max_negative_review_rate",
+        )
+        self.min_reviews_before_reviewer_check = int(min_reviews_before_reviewer_check)
+
+        if self.min_reviews_before_reviewer_check < 0:
+            raise ValueError("min_reviews_before_reviewer_check must be >= 0.")
+
         self.points = 0.0
         self.delivery_count = 0
         self._all_possible_coords = model.all_coordinates
@@ -90,6 +102,26 @@ class DeliveryAgent(CellAgent):
         summary = self.model.get_vtp_summary(target_id, service_type)
         return self._accepts_trust_score(summary["score"])
 
+    def verify_credibility(
+        self,
+        reviewer_id: str,
+    ) -> bool:
+        summary = self.model.get_reviewer_summary(reviewer_id)
+
+        if summary["total_reviews"] < self.min_reviews_before_reviewer_check:
+            return True
+
+        return summary["negative_review_rate"] <= self.max_negative_review_rate
+
+    @staticmethod
+    def _validate_probability(value: float, name: str) -> float:
+        value = float(value)
+
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} probability must be between 0.0 and 1.0")
+
+        return value
+
     def _accepts_trust_score(self, score: float) -> bool:
         """Decide whether this agent accepts another agent's ledger-derived score."""
         if score <= self.trust_reject_threshold:
@@ -103,6 +135,20 @@ class DeliveryAgent(CellAgent):
         )
 
         return self.random.random() <= acceptance_probability
+
+    def accepts_requester_for_service(
+        self,
+        requester: CellAgent,
+        service_type: str = MAP_DATA_SERVICE,
+    ) -> bool:
+        if not self.verify_vtp(requester.unique_id, service_type):
+            return False
+
+        # TODO: maybe we should always have this check, even when the other agent isn't leaving a review?
+        if not self.verify_credibility(requester.unique_id):
+            return False
+
+        return True
 
     def build_outcome_meta(self) -> dict[str, Any]:
         return {
@@ -283,7 +329,7 @@ class DeliveryAgent(CellAgent):
         if target not in self.known_drop_offs:
             return None
 
-        if not self.verify_vtp(requester.unique_id, MAP_DATA_SERVICE):
+        if not self.accepts_requester_for_service(requester, MAP_DATA_SERVICE):
             return None
 
         coordinate = self.known_drop_offs[target]
@@ -462,6 +508,8 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         vision_radius: int = 1,
         trust_reject_threshold: float = 0.3,
         trust_accept_threshold: float = 0.8,
+        max_negative_review_rate: float = 0.6,
+        min_reviews_before_reviewer_check: int = 3,
         false_map_probability: float = 0.5,
         false_negative_review_probability: float = 0.5,
         false_positive_review_probability: float = 0.5,
@@ -490,6 +538,14 @@ class MaliciousDeliveryAgent(DeliveryAgent):
     @override
     def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
         # TODO: think about the order here, right now magents will see if they should lie first, if not act honest. Previously it was the other way around.
+
+        # if the target coordinates are not known
+        if target not in self.known_drop_offs:
+            return None
+        # if the requester is not trusted
+        if not self.accepts_requester_for_service(requester, MAP_DATA_SERVICE):
+            return None
+
         if self._draw_probability(self.false_map_probability):
             # generate fake coordinates
             coordinate = (
@@ -498,13 +554,6 @@ class MaliciousDeliveryAgent(DeliveryAgent):
             )
 
             return coordinate
-
-        # if the target coordinates are not known
-        elif target not in self.known_drop_offs:
-            return None
-        # if the requester is not trusted
-        elif not self.verify_vtp(requester.unique_id, MAP_DATA_SERVICE):
-            return None
 
         coordinate = self.known_drop_offs[target]
 
@@ -547,15 +596,6 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         )
 
         return reported_outcome_status, review_meta
-
-    @staticmethod
-    def _validate_probability(value: float, name: str) -> float:
-        value = float(value)
-
-        if not 0.0 <= value <= 1.0:
-            raise ValueError(f"{name} probability must be between 0.0 and 1.0")
-
-        return value
 
     def _draw_probability(self, probability: float) -> bool:
         return self.random.random() < probability
