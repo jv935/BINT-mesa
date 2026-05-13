@@ -18,6 +18,8 @@ DEFAULT_MALICIOUS_AGENTS = 3
 DEFAULT_FALSE_MAP_PROBABILITY = 0.5
 DEFAULT_FALSE_NEGATIVE_REVIEW_PROBABILITY = 0.5
 DEFAULT_FALSE_POSITIVE_REVIEW_PROBABILITY = 0.5
+DEFAULT_MAX_NEGATIVE_REVIEW_RATE = 0.6
+DEFAULT_MIN_REVIEWS_BEFORE_REVIEWER_CHECK = 3
 DEFAULT_MAX_STEPS = 1_000
 
 def default_agent_profiles() -> list[AgentProfile]:
@@ -29,6 +31,8 @@ def default_agent_profiles() -> list[AgentProfile]:
                 "vision_radius": DEFAULT_AGENT_VISION_RADIUS,
                 "trust_reject_threshold": DEFAULT_TRUST_REJECT_THRESHOLD,
                 "trust_accept_threshold": DEFAULT_TRUST_ACCEPT_THRESHOLD,
+                "max_negative_review_rate": DEFAULT_MAX_NEGATIVE_REVIEW_RATE,
+                "min_reviews_before_reviewer_check": DEFAULT_MIN_REVIEWS_BEFORE_REVIEWER_CHECK,
             },
         ),
         AgentProfile(
@@ -38,6 +42,8 @@ def default_agent_profiles() -> list[AgentProfile]:
                 "vision_radius": DEFAULT_AGENT_VISION_RADIUS,
                 "trust_reject_threshold": DEFAULT_TRUST_REJECT_THRESHOLD,
                 "trust_accept_threshold": DEFAULT_TRUST_ACCEPT_THRESHOLD,
+                "max_negative_review_rate": DEFAULT_MAX_NEGATIVE_REVIEW_RATE,
+                "min_reviews_before_reviewer_check": DEFAULT_MIN_REVIEWS_BEFORE_REVIEWER_CHECK,
                 "false_map_probability": DEFAULT_FALSE_MAP_PROBABILITY,
                 "false_negative_review_probability": DEFAULT_FALSE_NEGATIVE_REVIEW_PROBABILITY,
                 "false_positive_review_probability": DEFAULT_FALSE_POSITIVE_REVIEW_PROBABILITY,
