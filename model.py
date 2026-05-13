@@ -387,6 +387,43 @@ class BintWorldModel(mesa.Model):
             "other_burned_tnfts": other_burned_tnfts,
         }
 
+    def get_reviewer_summary(self, reviewer_id: str) -> dict[str, Any]:
+        total_reviews = 0
+        positive_reviews = 0
+        negative_reviews = 0
+        disputed_reviews = 0
+
+        for interaction in self.interactions.values():
+            if interaction.truster_id != reviewer_id:
+                continue
+
+            outcome = self.outcomes.get(interaction.interaction_id)
+
+            if outcome is None:
+                continue
+
+            total_reviews += 1
+
+            if outcome.status == "success":
+                positive_reviews += 1
+            elif outcome.status == "failure":
+                negative_reviews += 1
+            elif outcome.status == "disputed":
+                disputed_reviews += 1
+
+        negative_review_rate = (
+            negative_reviews / total_reviews if total_reviews > 0 else 0.0
+        )
+
+        return {
+            "reviewer_id": reviewer_id,
+            "total_reviews": total_reviews,
+            "positive_reviews": positive_reviews,
+            "negative_reviews": negative_reviews,
+            "disputed_reviews": disputed_reviews,
+            "negative_review_rate": negative_review_rate,
+        }
+
     @staticmethod
     def _tnft_weight(tnft: dict[str, Any]) -> float:
         """Return the reputation weight of a TNFT.
