@@ -17,6 +17,7 @@ from typing import Any
 
 from matplotlib.figure import Figure
 from mesa.visualization import SolaraViz
+import mesa.visualization.solara_viz as mesa_solara_viz
 from mesa.visualization.utils import update_counter
 import solara
 
@@ -45,8 +46,6 @@ APP_CSS = """
 
 .bint-map {
     width: 100%;
-    height: 64vh;
-    min-height: 480px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -72,6 +71,33 @@ APP_CSS = """
     align-items: center;
     justify-content: center;
     overflow: hidden;
+}
+
+.bint-table-card {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.bint-table-card table {
+    width: 100%;
+    min-width: 1200px;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+    table-layout: fixed;
+}
+
+.bint-table-card th,
+.bint-table-card td {
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid #ddd;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    vertical-align: top;
+}
+
+.bint-table-card th {
+    font-weight: 600;
 }
 
 .bint-map img,
@@ -106,6 +132,43 @@ APP_CSS = """
 def AppStyles() -> None:
     solara.Style(APP_CSS)
 
+
+def _patch_solara_viz_layout() -> None:
+    """Set better default component sizes for this dashboard.
+
+    SolaraViz uses a resizable grid. Without this, wide/tall components like the
+    decision table often start too small and need manual resizing.
+    """
+    make_layout = getattr(mesa_solara_viz, "make_initial_grid_layout", None)
+
+    if make_layout is None or getattr(make_layout, "_bint_patched", False):
+        return
+
+    def bint_initial_layout(num_components: int) -> list[dict[str, Any]]:
+        layout = make_layout(num_components)
+
+        if not layout:
+            return layout
+
+        if num_components == 1:
+            layout[0].update({"x": 0, "y": 0, "w": 12, "h": 10})
+            return layout
+
+        if num_components == 2:
+            layout[0].update({"x": 0, "y": 0, "w": 8, "h": 8})
+            layout[1].update({"x": 8, "y": 0, "w": 4, "h": 8})
+            return layout
+
+        for index, item in enumerate(layout):
+            item.update({"x": 0, "y": index * 5, "w": 12, "h": 5})
+
+        return layout
+
+    bint_initial_layout._bint_patched = True  # type: ignore[attr-defined]
+    mesa_solara_viz.make_initial_grid_layout = bint_initial_layout
+
+
+_patch_solara_viz_layout()
 
 # -----------------------------------------------------------------------------
 # Model factory
@@ -180,6 +243,46 @@ def _trust_score(model: BintWorldModel, agent: DeliveryAgent) -> float:
     return float(model.get_vtp_summary(agent.unique_id, MAP_DATA_SERVICE)["score"])
 
 
+def _format_optional_float(value: float | None, digits: int = 3) -> str:
+    if value is None:
+        return "-"
+
+    return f"{value:.{digits}f}"
+
+
+def _short_id(value: Any) -> str:
+    if value is None:
+        return "-"
+
+    text = str(value)
+    return text[:8]
+
+
+DECISION_LABELS = {
+    "accept_map_response": "accept response",
+    "share_map": "share map",
+    "none": "none",
+}
+
+REASON_LABELS = {
+    "provider_accepted": "provider accepted",
+    "requester_accepted": "requester accepted",
+    "provider_rejected_low_vtp": "provider low VTP",
+    "provider_rejected_low_reviewer_credibility": "provider reviewer risk",
+    "requester_rejected_low_vtp": "requester low VTP",
+    "requester_rejected_low_reviewer_credibility": "requester reviewer risk",
+    "rejected_unknown_target": "unknown target",
+    "none": "none",
+}
+
+
+def _display_label(value: str | None, labels: dict[str, str]) -> str:
+    if value is None:
+        return "-"
+
+    return labels.get(value, value.replace("_", " "))
+
+
 # -----------------------------------------------------------------------------
 # Components
 # -----------------------------------------------------------------------------
@@ -196,9 +299,9 @@ def DynamicMap(model: BintWorldModel) -> None:
     grid_height = model.height
 
     dpi = 120
-    target_cell_px = 20
-    max_render_width_px = 1_100
-    max_render_height_px = 850
+    target_cell_px = 12
+    max_render_width_px = 720
+    max_render_height_px = 620
 
     desired_width_px = max(180, grid_width * target_cell_px)
     desired_height_px = max(180, grid_height * target_cell_px)
@@ -390,6 +493,67 @@ def RunSummary(model: BintWorldModel, scenario_name: str) -> None:
 
 
 @solara.component
+def RunSummaryPanel(model: BintWorldModel) -> None:
+    RunSummary(model, DEFAULT_SCENARIO)
+
+
+@solara.component
+def AgentDecisions(model: BintWorldModel) -> None:
+    """Show current per-agent status and latest recorded decision."""
+
+    update_counter.get()
+    AppStyles()
+
+    rows = []
+    for agent in model.cached_delivery_agents:
+        vtp_summary = model.get_vtp_summary(agent.unique_id, MAP_DATA_SERVICE)
+        reviewer_summary = model.get_reviewer_summary(agent.unique_id)
+
+        rows.append(
+            {
+                "id": _short_id(agent.unique_id),
+                "type": (
+                    "malicious"
+                    if isinstance(agent, MaliciousDeliveryAgent)
+                    else "honest"
+                ),
+                "trust": _format_optional_float(float(vtp_summary["score"])),
+                "reviews": reviewer_summary["total_reviews"],
+                "negative": reviewer_summary["negative_reviews"],
+                "neg_rate": _format_optional_float(
+                    reviewer_summary["negative_review_rate"]
+                ),
+                "active": vtp_summary["total_active"],
+                "burned": vtp_summary["total_burned"],
+                "points": f"{agent.points:.1f}",
+                "deliveries": agent.delivery_count,
+                "decision": _display_label(agent.last_decision_type, DECISION_LABELS),
+                "reason": _display_label(agent.last_decision_reason, REASON_LABELS),
+                "peer": _short_id(agent.last_decision_peer_id),
+            }
+        )
+
+    table_rows = "\n".join(
+        f"| {row['id']} | {row['type']} | {row['trust']} | "
+        f"{row['reviews']} | {row['negative']} | {row['neg_rate']} | "
+        f"{row['active']} | {row['burned']} | {row['points']} | {row['deliveries']} | "
+        f"{row['decision']} | {row['reason']} | {row['peer']} |"
+        for row in rows
+    )
+
+    with solara.Column(classes=["bint-table-card"]):
+        solara.Markdown(
+            f"""
+### Agent status and decisions
+
+| Agent | Type | Trust | Reviews | Neg. | Neg. rate | Active | Burned | Points | Deliveries | Last decision | Last reason | Last peer |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|
+{table_rows}
+"""
+        )
+
+
+@solara.component
 def Dashboard(model: BintWorldModel) -> None:
     """Single dashboard component to avoid Mesa/Solara grid overlap."""
 
@@ -401,6 +565,7 @@ def Dashboard(model: BintWorldModel) -> None:
         with solara.Row(classes=["bint-lower-panel"]):
             RunSummary(model, DEFAULT_SCENARIO)
             CurrentTrustScores(model)
+        AgentDecisions(model)
 
 
 # -----------------------------------------------------------------------------
@@ -412,6 +577,11 @@ bint = make_bint_model()
 
 page = SolaraViz(
     model=bint,
-    components=[Dashboard],
+    components=[
+        (DynamicMap, 0),
+        (RunSummaryPanel, 0),
+        (AgentDecisions, 1),
+        (CurrentTrustScores, 2),
+    ],
     name="BINT Simulation",
 )
