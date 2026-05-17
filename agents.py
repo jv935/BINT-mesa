@@ -11,6 +11,10 @@ ENV_FLOOR = "floor"
 ENV_DROP_OFF = "drop_off"
 
 SOURCE_SELF = "self"
+SOURCE_SYSTEM = "system"
+
+VERIFIED_MAP_SOURCES = {SOURCE_SELF, SOURCE_SYSTEM}
+
 MAP_DATA_SERVICE = "map_data"
 
 
@@ -35,7 +39,7 @@ class DeliveryAgent(CellAgent):
         trust_reject_threshold: float = 0.3,
         trust_accept_threshold: float = 0.8,
         max_negative_review_rate: float = 0.6,
-        min_reviews_before_reviewer_check: int = 3,
+        min_reviews_before_reviewer_check: int = 10,
     ) -> None:
         """
         An agent that delivers packages to drop-off locations. Can share map data with other agents.
@@ -50,7 +54,13 @@ class DeliveryAgent(CellAgent):
         super().__init__(model)
         self.cell = cell
         self.internal_map: dict[Coordinate, MapRecord] = {}
+
+        # verified drop-off coordinates, safe to share.
         self.known_drop_offs: dict[str, Coordinate] = {}
+
+        # unverified drop-off coordinates, can be used by this agent
+        # but should not be shared until verified
+        self.candidate_drop_offs: dict[str, Coordinate] = {}
 
         self.goal_name: str | None = None
         self.prev_goal_name: str | None = None
@@ -85,6 +95,13 @@ class DeliveryAgent(CellAgent):
         self._all_possible_coords = model.all_coordinates
         self.cached_active_tnfts = 0
         self.cached_burned_tnfts = 0
+
+        self.last_decision_type: str = "none"
+        self.last_decision_reason: str = "none"
+        self.last_decision_peer_id: str | None = None
+        self.last_decision_service_type: str | None = None
+        self.last_checked_trust_score: float | None = None
+        self.last_checked_negative_review_rate: float | None = None
 
     @property
     def map_size(self) -> int:
@@ -122,6 +139,22 @@ class DeliveryAgent(CellAgent):
 
         return value
 
+    def record_decision(
+        self,
+        decision_type: str,
+        reason: str,
+        peer_id: str | None = None,
+        service_type: str | None = None,
+        trust_score: float | None = None,
+        negative_review_rate: float | None = None,
+    ) -> None:
+        self.last_decision_type = decision_type
+        self.last_decision_reason = reason
+        self.last_decision_peer_id = peer_id
+        self.last_decision_service_type = service_type
+        self.last_checked_trust_score = trust_score
+        self.last_checked_negative_review_rate = negative_review_rate
+
     def _accepts_trust_score(self, score: float) -> bool:
         """Decide whether this agent accepts another agent's ledger-derived score."""
         if score <= self.trust_reject_threshold:
@@ -141,13 +174,47 @@ class DeliveryAgent(CellAgent):
         requester: CellAgent,
         service_type: str = MAP_DATA_SERVICE,
     ) -> bool:
-        if not self.verify_vtp(requester.unique_id, service_type):
+        # doing it like this just for logging purposes
+        vtp_summary = self.model.get_vtp_summary(requester.unique_id, service_type)
+        reviewer_summary = self.model.get_reviewer_summary(requester.unique_id)
+
+        trust_score = vtp_summary["score"]
+        negative_review_rate = reviewer_summary["negative_review_rate"]
+
+        if not self._accepts_trust_score(trust_score):
+            self.record_decision(
+                decision_type="share_map",
+                reason="requester_rejected_low_vtp",
+                peer_id=requester.unique_id,
+                service_type=service_type,
+                trust_score=trust_score,
+                negative_review_rate=negative_review_rate,
+            )
             return False
 
         # TODO: maybe we should always have this check, even when the other agent isn't leaving a review?
-        if not self.verify_credibility(requester.unique_id):
+        if (
+            reviewer_summary["total_reviews"] >= self.min_reviews_before_reviewer_check
+            and negative_review_rate > self.max_negative_review_rate
+        ):
+            self.record_decision(
+                decision_type="share_map",
+                reason="requester_rejected_low_reviewer_credibility",
+                peer_id=requester.unique_id,
+                service_type=service_type,
+                trust_score=trust_score,
+                negative_review_rate=negative_review_rate,
+            )
             return False
 
+        self.record_decision(
+            decision_type="share_map",
+            reason="requester_accepted",
+            peer_id=requester.unique_id,
+            service_type=service_type,
+            trust_score=trust_score,
+            negative_review_rate=negative_review_rate,
+        )
         return True
 
     def build_outcome_meta(self) -> dict[str, Any]:
@@ -222,6 +289,14 @@ class DeliveryAgent(CellAgent):
 
         self.delivery_count += 1
 
+        if self.goal_name is not None:
+            self.update_internal_map(
+                coordinate=self.cell.coordinate,
+                env_type=ENV_DROP_OFF,
+                info_source=SOURCE_SELF,
+                drop_off_name=self.goal_name,
+            )
+
         self._settle_current_interaction(
             outcome_status="success",
             points_delta=points_delta,
@@ -242,10 +317,10 @@ class DeliveryAgent(CellAgent):
             outcome_meta=outcome_meta,
         )
 
-        if self.goal_name is not None:
-            self.known_drop_offs.pop(self.goal_name, None)
+        self._remove_drop_off_name(self.goal_name)
 
         if self.target_coordinate is not None:
+            self._remove_drop_off_coordinate(self.target_coordinate)
             self.internal_map.pop(self.target_coordinate, None)
 
     def decide_reported_outcome(
@@ -298,6 +373,32 @@ class DeliveryAgent(CellAgent):
         self.current_provider_id = None
         self.current_interaction_id = None
 
+    @staticmethod
+    def _is_verified_map_source(info_source: str) -> bool:
+        return info_source in VERIFIED_MAP_SOURCES
+
+    def _get_goal_coordinate(self, drop_off_name: str | None) -> Coordinate | None:
+        if drop_off_name is None:
+            return None
+
+        if drop_off_name in self.known_drop_offs:
+            return self.known_drop_offs[drop_off_name]
+
+        return self.candidate_drop_offs.get(drop_off_name)
+
+    def _remove_drop_off_name(self, drop_off_name: str | None) -> None:
+        if drop_off_name is None:
+            return
+
+        self.known_drop_offs.pop(drop_off_name, None)
+        self.candidate_drop_offs.pop(drop_off_name, None)
+
+    def _remove_drop_off_coordinate(self, coordinate: Coordinate) -> None:
+        for drop_offs in (self.known_drop_offs, self.candidate_drop_offs):
+            for drop_off_name, stored_coordinate in list(drop_offs.items()):
+                if stored_coordinate == coordinate:
+                    drop_offs.pop(drop_off_name, None)
+
     def update_internal_map(
         self,
         coordinate: Coordinate,
@@ -308,13 +409,15 @@ class DeliveryAgent(CellAgent):
         """
         Update the agent's internal map.
 
-        Direct observations from the agent itself are treated as stronger than
-        information received from other agents.
+        Self/system drop-off knowledge is treated as verified.
+        Peer-provided drop-off knowledge is treated as candidate knowledge until verified.
         """
         if coordinate in self.internal_map:
             existing_source = self.internal_map[coordinate]["source"]
 
-            if existing_source == SOURCE_SELF and info_source != SOURCE_SELF:
+            if self._is_verified_map_source(
+                existing_source
+            ) and not self._is_verified_map_source(info_source):
                 return
 
         self.internal_map[coordinate] = {
@@ -322,11 +425,29 @@ class DeliveryAgent(CellAgent):
             "source": info_source,
         }
 
-        if drop_off_name is not None:
+        # If the agent directly observes that this coordinate is not a drop-off,
+        # remove any drop-off mapping pointing to it.
+        if info_source == SOURCE_SELF and env_type != ENV_DROP_OFF:
+            self._remove_drop_off_coordinate(coordinate)
+            return
+
+        if drop_off_name is None:
+            return
+
+        if self._is_verified_map_source(info_source):
             self.known_drop_offs[drop_off_name] = coordinate
+            self.candidate_drop_offs.pop(drop_off_name, None)
+        elif drop_off_name not in self.known_drop_offs:
+            self.candidate_drop_offs[drop_off_name] = coordinate
 
     def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
         if target not in self.known_drop_offs:
+            self.record_decision(
+                decision_type="share_map",
+                reason="rejected_unknown_target",
+                peer_id=requester.unique_id,
+                service_type=MAP_DATA_SERVICE,
+            )
             return None
 
         if not self.accepts_requester_for_service(requester, MAP_DATA_SERVICE):
@@ -412,13 +533,15 @@ class DeliveryAgent(CellAgent):
         return self.goal_name is not None and self.package is not None
 
     def _knows_goal_location(self) -> bool:
-        return self.goal_name is not None and self.goal_name in self.known_drop_offs
+        return self._get_goal_coordinate(self.goal_name) is not None
 
     def _start_delivering_to_known_goal(self) -> None:
-        if self.goal_name is None:
+        coordinate = self._get_goal_coordinate(self.goal_name)
+
+        if coordinate is None:
             return
 
-        self.target_coordinate = self.known_drop_offs[self.goal_name]
+        self.target_coordinate = coordinate
         self.state = "DELIVERING"
 
     def _should_search_for_goal_location(self) -> bool:
@@ -451,7 +574,38 @@ class DeliveryAgent(CellAgent):
 
         provider_id = response["agent"]
 
-        if not self.verify_vtp(provider_id, MAP_DATA_SERVICE):
+        provider_summary = self.model.get_vtp_summary(provider_id, MAP_DATA_SERVICE)
+        provider_reviewer_summary = self.model.get_reviewer_summary(provider_id)
+
+        provider_trust_score = provider_summary["score"]
+        provider_negative_review_rate = provider_reviewer_summary[
+            "negative_review_rate"
+        ]
+
+        if not self._accepts_trust_score(provider_trust_score):
+            self.record_decision(
+                decision_type="accept_map_response",
+                reason="provider_rejected_low_vtp",
+                peer_id=provider_id,
+                service_type=MAP_DATA_SERVICE,
+                trust_score=provider_trust_score,
+                negative_review_rate=provider_negative_review_rate,
+            )
+            return False
+
+        if (
+            provider_reviewer_summary["total_reviews"]
+            >= self.min_reviews_before_reviewer_check
+            and provider_negative_review_rate > self.max_negative_review_rate
+        ):
+            self.record_decision(
+                decision_type="accept_map_response",
+                reason="provider_rejected_low_reviewer_credibility",
+                peer_id=provider_id,
+                service_type=MAP_DATA_SERVICE,
+                trust_score=provider_trust_score,
+                negative_review_rate=provider_negative_review_rate,
+            )
             return False
 
         self.update_internal_map(
@@ -461,7 +615,7 @@ class DeliveryAgent(CellAgent):
             drop_off_name=self.goal_name,
         )
 
-        if self.goal_name not in self.known_drop_offs:
+        if self._get_goal_coordinate(self.goal_name) is None:
             return False
 
         self.current_provider_id = provider_id
@@ -474,6 +628,15 @@ class DeliveryAgent(CellAgent):
                 "shared_coordinate": response["coord"],
                 "provider_distance": response["dist"],
             },
+        )
+
+        self.record_decision(
+            decision_type="accept_map_response",
+            reason="provider_accepted",
+            peer_id=provider_id,
+            service_type=MAP_DATA_SERVICE,
+            trust_score=provider_trust_score,
+            negative_review_rate=provider_negative_review_rate,
         )
 
         return True
@@ -509,7 +672,7 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         trust_reject_threshold: float = 0.3,
         trust_accept_threshold: float = 0.8,
         max_negative_review_rate: float = 0.6,
-        min_reviews_before_reviewer_check: int = 3,
+        min_reviews_before_reviewer_check: int = 10,
         false_map_probability: float = 0.5,
         false_negative_review_probability: float = 0.5,
         false_positive_review_probability: float = 0.5,
@@ -520,6 +683,8 @@ class MaliciousDeliveryAgent(DeliveryAgent):
             vision_radius,
             trust_reject_threshold,
             trust_accept_threshold,
+            max_negative_review_rate,
+            min_reviews_before_reviewer_check,
         )
 
         self.false_map_probability = self._validate_probability(
@@ -537,27 +702,36 @@ class MaliciousDeliveryAgent(DeliveryAgent):
 
     @override
     def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
-        # TODO: think about the order here, right now magents will see if they should lie first, if not act honest. Previously it was the other way around.
+        target_is_known = target in self.known_drop_offs
 
-        # if the target coordinates are not known
-        if target not in self.known_drop_offs:
+        if not target_is_known:
+            if not self.accepts_requester_for_service(requester, MAP_DATA_SERVICE):
+                return None
+
+            if self._draw_probability(self.false_map_probability):
+                return (
+                    self.random.randint(0, self.model.grid.width - 1),
+                    self.random.randint(0, self.model.grid.height - 1),
+                )
+
+            self.record_decision(
+                decision_type="share_map",
+                reason="rejected_unknown_target",
+                peer_id=requester.unique_id,
+                service_type=MAP_DATA_SERVICE,
+            )
             return None
-        # if the requester is not trusted
+
         if not self.accepts_requester_for_service(requester, MAP_DATA_SERVICE):
             return None
 
         if self._draw_probability(self.false_map_probability):
-            # generate fake coordinates
-            coordinate = (
+            return (
                 self.random.randint(0, self.model.grid.width - 1),
                 self.random.randint(0, self.model.grid.height - 1),
             )
 
-            return coordinate
-
-        coordinate = self.known_drop_offs[target]
-
-        return coordinate
+        return self.known_drop_offs[target]
 
     @override
     def decide_reported_outcome(
