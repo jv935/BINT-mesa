@@ -531,23 +531,22 @@ class BintWorldModel(mesa.Model):
             if agent == requester:
                 continue
 
-            if target_name in agent.known_drop_offs:
-                agent_resp = agent.share_map(requester, target_name)
+            agent_resp = agent.share_map(requester, target_name)
 
-                if agent_resp is None:
-                    continue
+            if agent_resp is None:
+                continue
 
-                provider_distance = self.chebyshev_distance(
-                    requester.cell.coordinate, agent.cell.coordinate
-                )
+            provider_distance = self.chebyshev_distance(
+                requester.cell.coordinate, agent.cell.coordinate
+            )
 
-                responses.append(
-                    {
-                        "agent": agent.unique_id,
-                        "dist": provider_distance,
-                        "coord": agent_resp,
-                    }
-                )
+            responses.append(
+                {
+                    "agent": agent.unique_id,
+                    "dist": provider_distance,
+                    "coord": agent_resp,
+                }
+            )
 
         responses = sorted(responses, key=lambda response: response["dist"])
 
