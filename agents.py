@@ -40,6 +40,11 @@ class DeliveryAgent(CellAgent):
         trust_accept_threshold: float = 0.8,
         max_negative_review_rate: float = 0.6,
         min_reviews_before_reviewer_check: int = 10,
+        context_match_weight: float = 1.0,
+        other_context_weight: float = 0.25,
+        trust_prior_active: float = 1.0,
+        trust_prior_burned: float = 1.0,
+        burned_weight_multiplier: float = 1.0,
     ) -> None:
         """
         An agent that delivers packages to drop-off locations. Can share map data with other agents.
@@ -90,6 +95,27 @@ class DeliveryAgent(CellAgent):
         if self.min_reviews_before_reviewer_check < 0:
             raise ValueError("min_reviews_before_reviewer_check must be >= 0.")
 
+        self.context_match_weight = float(context_match_weight)
+        self.other_context_weight = float(other_context_weight)
+        self.trust_prior_active = float(trust_prior_active)
+        self.trust_prior_burned = float(trust_prior_burned)
+        self.burned_weight_multiplier = float(burned_weight_multiplier)
+
+        if self.context_match_weight < 0:
+            raise ValueError("context_match_weight must be >= 0.")
+
+        if self.other_context_weight < 0:
+            raise ValueError("other_context_weight must be >= 0.")
+
+        if self.trust_prior_active <= 0:
+            raise ValueError("trust_prior_active must be > 0.")
+
+        if self.trust_prior_burned <= 0:
+            raise ValueError("trust_prior_burned must be > 0.")
+
+        if self.burned_weight_multiplier < 0:
+            raise ValueError("burned_weight_multiplier must be >= 0.")
+
         self.points = 0.0
         self.delivery_count = 0
         self._all_possible_coords = model.all_coordinates
@@ -116,7 +142,7 @@ class DeliveryAgent(CellAgent):
         return self.package["steps_taken"] if self.package else 0
 
     def verify_vtp(self, target_id: str, service_type: str = MAP_DATA_SERVICE) -> bool:
-        summary = self.model.get_vtp_summary(target_id, service_type)
+        summary = self.calculate_trust_summary(target_id, service_type)
         return self._accepts_trust_score(summary["score"])
 
     def verify_credibility(
@@ -155,6 +181,74 @@ class DeliveryAgent(CellAgent):
         self.last_checked_trust_score = trust_score
         self.last_checked_negative_review_rate = negative_review_rate
 
+    def calculate_trust_summary(
+        self,
+        target_id: str,
+        service_type: str | None = MAP_DATA_SERVICE,
+    ) -> dict[str, Any]:
+        """Calculate this agent's trust summary for another agent.
+
+        The model supplies raw ledger evidence. This agent decides how that
+        evidence should be weighted and converted into a trust score.
+        """
+        evidence = self.model.get_trust_evidence(target_id, service_type)
+        return self.calculate_trust_summary_from_evidence(evidence)
+
+    def calculate_trust_summary_from_evidence(
+        self,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        weighted_active = self._calculate_weighted_trust_evidence(
+            context_matching_count=evidence["context_matching_active"],
+            other_context_count=evidence["other_active"],
+        )
+        weighted_burned = self._calculate_weighted_trust_evidence(
+            context_matching_count=evidence["context_matching_burned"],
+            other_context_count=evidence["other_burned"],
+        )
+
+        weighted_burned *= self.burned_weight_multiplier
+
+        score = self._calculate_trust_score_from_weights(
+            weighted_active=weighted_active,
+            weighted_burned=weighted_burned,
+        )
+
+        return {
+            **evidence,
+            "weighted_active": weighted_active,
+            "weighted_burned": weighted_burned,
+            "score": score,
+            "trust_calculator": type(self).__name__,
+            "context_match_weight": self.context_match_weight,
+            "other_context_weight": self.other_context_weight,
+            "trust_prior_active": self.trust_prior_active,
+            "trust_prior_burned": self.trust_prior_burned,
+            "burned_weight_multiplier": self.burned_weight_multiplier,
+        }
+
+    def _calculate_weighted_trust_evidence(
+        self,
+        context_matching_count: int,
+        other_context_count: int,
+    ) -> float:
+        return (
+            self.context_match_weight * context_matching_count
+            + self.other_context_weight * other_context_count
+        )
+
+    def _calculate_trust_score_from_weights(
+        self,
+        weighted_active: float,
+        weighted_burned: float,
+    ) -> float:
+        return (self.trust_prior_active + weighted_active) / (
+            self.trust_prior_active
+            + self.trust_prior_burned
+            + weighted_active
+            + weighted_burned
+        )
+
     def _accepts_trust_score(self, score: float) -> bool:
         """Decide whether this agent accepts another agent's ledger-derived score."""
         if score <= self.trust_reject_threshold:
@@ -175,10 +269,10 @@ class DeliveryAgent(CellAgent):
         service_type: str = MAP_DATA_SERVICE,
     ) -> bool:
         # doing it like this just for logging purposes
-        vtp_summary = self.model.get_vtp_summary(requester.unique_id, service_type)
+        trust_summary = self.calculate_trust_summary(requester.unique_id, service_type)
         reviewer_summary = self.model.get_reviewer_summary(requester.unique_id)
 
-        trust_score = vtp_summary["score"]
+        trust_score = trust_summary["score"]
         negative_review_rate = reviewer_summary["negative_review_rate"]
 
         if not self._accepts_trust_score(trust_score):
@@ -411,6 +505,8 @@ class DeliveryAgent(CellAgent):
 
         Self/system drop-off knowledge is treated as verified.
         Peer-provided drop-off knowledge is treated as candidate knowledge until verified.
+
+        Direct self-observation is allowed to correct previous candidate knowledge.
         """
         if coordinate in self.internal_map:
             existing_source = self.internal_map[coordinate]["source"]
@@ -425,11 +521,22 @@ class DeliveryAgent(CellAgent):
             "source": info_source,
         }
 
-        # If the agent directly observes that this coordinate is not a drop-off,
-        # remove any drop-off mapping pointing to it.
+        # Directly observing floor means no known/candidate drop-off should point here.
         if info_source == SOURCE_SELF and env_type != ENV_DROP_OFF:
             self._remove_drop_off_coordinate(coordinate)
             return
+
+        # Directly observing a drop-off means this coordinate belongs to that
+        # observed drop-off, not to any other candidate drop-off name.
+        if (
+            info_source == SOURCE_SELF
+            and env_type == ENV_DROP_OFF
+            and drop_off_name is not None
+        ):
+            for drop_offs in (self.known_drop_offs, self.candidate_drop_offs):
+                for stored_name, stored_coordinate in list(drop_offs.items()):
+                    if stored_coordinate == coordinate and stored_name != drop_off_name:
+                        drop_offs.pop(stored_name, None)
 
         if drop_off_name is None:
             return
@@ -512,6 +619,11 @@ class DeliveryAgent(CellAgent):
     def step(self) -> None:
         self.perceive_env()
 
+        if self._current_delivery_target_invalidated():
+            self._handle_bad_delivery_target()
+            self._clear_current_target()
+            return
+
         if not self._has_active_package():
             return
 
@@ -556,6 +668,29 @@ class DeliveryAgent(CellAgent):
             or self.target_coordinate in self.internal_map
         )
 
+    def _current_delivery_target_invalidated(self) -> bool:
+        """Return True if perception has disproved the current provider map.
+
+        This only applies to deliveries based on an accepted interaction.
+        If the current target came from a provider and direct perception removed
+        or changed the goal mapping, the accepted map has failed.
+        """
+        if self.state != "DELIVERING":
+            return False
+
+        if self.current_interaction_id is None:
+            return False
+
+        if self.goal_name is None:
+            return False
+
+        if self.target_coordinate is None:
+            return False
+
+        current_goal_coordinate = self._get_goal_coordinate(self.goal_name)
+
+        return current_goal_coordinate != self.target_coordinate
+
     def _try_get_goal_location_from_other_agent(self) -> bool:
         if self.goal_name is None:
             return False
@@ -574,7 +709,7 @@ class DeliveryAgent(CellAgent):
 
         provider_id = response["agent"]
 
-        provider_summary = self.model.get_vtp_summary(provider_id, MAP_DATA_SERVICE)
+        provider_summary = self.calculate_trust_summary(provider_id, MAP_DATA_SERVICE)
         provider_reviewer_summary = self.model.get_reviewer_summary(provider_id)
 
         provider_trust_score = provider_summary["score"]
@@ -673,18 +808,28 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         trust_accept_threshold: float = 0.8,
         max_negative_review_rate: float = 0.6,
         min_reviews_before_reviewer_check: int = 10,
+        context_match_weight: float = 1.0,
+        other_context_weight: float = 0.25,
+        trust_prior_active: float = 1.0,
+        trust_prior_burned: float = 1.0,
+        burned_weight_multiplier: float = 1.0,
         false_map_probability: float = 0.5,
         false_negative_review_probability: float = 0.5,
         false_positive_review_probability: float = 0.5,
     ) -> None:
         super().__init__(
-            model,
-            cell,
-            vision_radius,
-            trust_reject_threshold,
-            trust_accept_threshold,
-            max_negative_review_rate,
-            min_reviews_before_reviewer_check,
+            model=model,
+            cell=cell,
+            vision_radius=vision_radius,
+            trust_reject_threshold=trust_reject_threshold,
+            trust_accept_threshold=trust_accept_threshold,
+            max_negative_review_rate=max_negative_review_rate,
+            min_reviews_before_reviewer_check=min_reviews_before_reviewer_check,
+            context_match_weight=context_match_weight,
+            other_context_weight=other_context_weight,
+            trust_prior_active=trust_prior_active,
+            trust_prior_burned=trust_prior_burned,
+            burned_weight_multiplier=burned_weight_multiplier,
         )
 
         self.false_map_probability = self._validate_probability(
