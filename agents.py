@@ -16,6 +16,7 @@ SOURCE_SYSTEM = "system"
 VERIFIED_MAP_SOURCES = {SOURCE_SELF, SOURCE_SYSTEM}
 
 MAP_DATA_SERVICE = "map_data"
+TRUSTED_SYSTEM_ISSUERS = {"SYSTEM"}
 
 
 class Package(TypedDict):
@@ -45,6 +46,7 @@ class DeliveryAgent(CellAgent):
         trust_prior_active: float = 1.0,
         trust_prior_burned: float = 1.0,
         burned_weight_multiplier: float = 1.0,
+        filter_untrusted_evidence: bool = True,
     ) -> None:
         """
         An agent that delivers packages to drop-off locations. Can share map data with other agents.
@@ -100,6 +102,7 @@ class DeliveryAgent(CellAgent):
         self.trust_prior_active = float(trust_prior_active)
         self.trust_prior_burned = float(trust_prior_burned)
         self.burned_weight_multiplier = float(burned_weight_multiplier)
+        self.filter_untrusted_evidence = bool(filter_untrusted_evidence)
 
         if self.context_match_weight < 0:
             raise ValueError("context_match_weight must be >= 0.")
@@ -185,19 +188,33 @@ class DeliveryAgent(CellAgent):
         self,
         target_id: str,
         service_type: str | None = MAP_DATA_SERVICE,
+        filter_untrusted_evidence: bool | None = None,
     ) -> dict[str, Any]:
         """Calculate this agent's trust summary for another agent.
 
         The model supplies raw ledger evidence. This agent decides how that
-        evidence should be weighted and converted into a trust score.
+        evidence should be filtered, weighted, and converted into a trust score.
         """
         evidence = self.model.get_trust_evidence(target_id, service_type)
-        return self.calculate_trust_summary_from_evidence(evidence)
+        return self.calculate_trust_summary_from_evidence(
+            evidence=evidence,
+            filter_untrusted_evidence=filter_untrusted_evidence,
+        )
 
     def calculate_trust_summary_from_evidence(
         self,
         evidence: dict[str, Any],
+        filter_untrusted_evidence: bool | None = None,
     ) -> dict[str, Any]:
+        if filter_untrusted_evidence is None:
+            filter_untrusted_evidence = self.filter_untrusted_evidence
+
+        unfiltered_total_active = evidence["total_active"]
+        unfiltered_total_burned = evidence["total_burned"]
+
+        if filter_untrusted_evidence:
+            evidence = self._filter_untrusted_trust_evidence(evidence)
+
         weighted_active = self._calculate_weighted_trust_evidence(
             context_matching_count=evidence["context_matching_active"],
             other_context_count=evidence["other_active"],
@@ -216,6 +233,11 @@ class DeliveryAgent(CellAgent):
 
         return {
             **evidence,
+            "unfiltered_total_active": unfiltered_total_active,
+            "unfiltered_total_burned": unfiltered_total_burned,
+            "filtered_out_active": unfiltered_total_active - evidence["total_active"],
+            "filtered_out_burned": unfiltered_total_burned - evidence["total_burned"],
+            "filter_untrusted_evidence": filter_untrusted_evidence,
             "weighted_active": weighted_active,
             "weighted_burned": weighted_burned,
             "score": score,
@@ -225,6 +247,100 @@ class DeliveryAgent(CellAgent):
             "trust_prior_active": self.trust_prior_active,
             "trust_prior_burned": self.trust_prior_burned,
             "burned_weight_multiplier": self.burned_weight_multiplier,
+        }
+
+    def _filter_untrusted_trust_evidence(
+        self,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        service_type = evidence["service_type"]
+
+        trusted_active_tnfts = [
+            tnft
+            for tnft in evidence["active_tnfts"]
+            if self._trusts_evidence_source(tnft.get("issuer"), service_type)
+        ]
+
+        trusted_burned_tnfts = [
+            tnft
+            for tnft in evidence["burned_tnfts"]
+            if self._trusts_evidence_source(tnft.get("burned_by"), service_type)
+        ]
+
+        return self._build_trust_evidence_from_tnfts(
+            original_evidence=evidence,
+            active_tnfts=trusted_active_tnfts,
+            burned_tnfts=trusted_burned_tnfts,
+        )
+
+    def _trusts_evidence_source(
+        self,
+        source_id: Any,
+        service_type: str | None,
+    ) -> bool:
+        """Return whether this agent accepts evidence created by source_id.
+
+        This uses a hard reject-threshold rule, not the probabilistic trust
+        acceptance rule, because evidence filtering should be deterministic.
+        """
+        if source_id is None:
+            return False
+
+        if source_id in TRUSTED_SYSTEM_ISSUERS:
+            return True
+
+        if source_id == self.unique_id:
+            return True
+
+        source_summary = self.calculate_trust_summary(
+            target_id=source_id,
+            service_type=service_type,
+            filter_untrusted_evidence=False,
+        )
+
+        return source_summary["score"] > self.trust_reject_threshold
+
+    def _build_trust_evidence_from_tnfts(
+        self,
+        original_evidence: dict[str, Any],
+        active_tnfts: list[dict[str, Any]],
+        burned_tnfts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        service_type = original_evidence["service_type"]
+
+        if service_type is None:
+            context_matching_active_tnfts = active_tnfts
+            other_active_tnfts = []
+            context_matching_burned_tnfts = burned_tnfts
+            other_burned_tnfts = []
+        else:
+            context_matching_active_tnfts = [
+                tnft for tnft in active_tnfts if tnft["service_type"] == service_type
+            ]
+            other_active_tnfts = [
+                tnft for tnft in active_tnfts if tnft["service_type"] != service_type
+            ]
+            context_matching_burned_tnfts = [
+                tnft for tnft in burned_tnfts if tnft["service_type"] == service_type
+            ]
+            other_burned_tnfts = [
+                tnft for tnft in burned_tnfts if tnft["service_type"] != service_type
+            ]
+
+        return {
+            **original_evidence,
+            "total_active": len(active_tnfts),
+            "context_matching_active": len(context_matching_active_tnfts),
+            "other_active": len(other_active_tnfts),
+            "total_burned": len(burned_tnfts),
+            "context_matching_burned": len(context_matching_burned_tnfts),
+            "other_burned": len(other_burned_tnfts),
+            "active_tnfts": active_tnfts,
+            "burned_tnfts": burned_tnfts,
+            "context_matching_active_tnfts": context_matching_active_tnfts,
+            "other_active_tnfts": other_active_tnfts,
+            "context_matching_burned_tnfts": context_matching_burned_tnfts,
+            "other_burned_tnfts": other_burned_tnfts,
         }
 
     def _calculate_weighted_trust_evidence(
@@ -813,6 +929,7 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         trust_prior_active: float = 1.0,
         trust_prior_burned: float = 1.0,
         burned_weight_multiplier: float = 1.0,
+        filter_untrusted_evidence: bool = True,
         false_map_probability: float = 0.5,
         false_negative_review_probability: float = 0.5,
         false_positive_review_probability: float = 0.5,
