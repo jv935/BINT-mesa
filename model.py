@@ -26,7 +26,7 @@ BOOTSTRAP_SERVICE = "bootstrap"
 
 BASE_DELIVERY_POINTS = 10.0
 GRACE_WINDOW_RATIO = 0.5
-LATE_PENALTY_PER_STEP = 1.0
+LATE_PENALTY_PER_STEP = 0.5
 
 
 @dataclass
@@ -327,7 +327,17 @@ class BintWorldModel(mesa.Model):
 
         return sorted(tnfts, key=lambda tnft: tnft["timestamp"], reverse=True)
 
-    def get_vtp_summary(self, agent_id: str, service_type: str | None = None) -> dict:
+    def get_trust_evidence(
+        self,
+        agent_id: str,
+        service_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Return raw ledger evidence for an agent.
+
+        The model owns the TNFT ledger, so it is responsible for retrieving and
+        grouping evidence. Agents are responsible for interpreting this evidence
+        into a trust score.
+        """
         active_tnfts = self.get_vtp(agent_id, service_type=None, active_only=True)
         burned_tnfts = [
             tnft
@@ -354,19 +364,6 @@ class BintWorldModel(mesa.Model):
                 tnft for tnft in burned_tnfts if tnft["service_type"] != service_type
             ]
 
-        weighted_active = self._calculate_weighted_tnfts(
-            context_matching_tnfts=context_matching_active_tnfts,
-            other_tnfts=other_active_tnfts,
-        )
-        weighted_burned = self._calculate_weighted_tnfts(
-            context_matching_tnfts=context_matching_burned_tnfts,
-            other_tnfts=other_burned_tnfts,
-        )
-        score = self._calculate_trust_score(
-            weighted_active=weighted_active,
-            weighted_burned=weighted_burned,
-        )
-
         return {
             "agent_id": agent_id,
             "service_type": service_type,
@@ -376,15 +373,51 @@ class BintWorldModel(mesa.Model):
             "total_burned": len(burned_tnfts),
             "context_matching_burned": len(context_matching_burned_tnfts),
             "other_burned": len(other_burned_tnfts),
+            "active_tnfts": active_tnfts,
+            "burned_tnfts": burned_tnfts,
+            "context_matching_active_tnfts": context_matching_active_tnfts,
+            "other_active_tnfts": other_active_tnfts,
+            "context_matching_burned_tnfts": context_matching_burned_tnfts,
+            "other_burned_tnfts": other_burned_tnfts,
+        }
+
+    def get_vtp_summary(
+        self,
+        agent_id: str,
+        service_type: str | None = None,
+        evaluator: DeliveryAgent | None = None,
+    ) -> dict[str, Any]:
+        """Return a trust summary.
+
+        Prefer passing an evaluator agent so the score is calculated using that
+        agent's own trust interpretation. Without an evaluator, this returns the
+        raw evidence plus a neutral fallback score for legacy callers.
+        """
+        evidence = self.get_trust_evidence(agent_id, service_type)
+
+        if evaluator is not None:
+            return evaluator.calculate_trust_summary_from_evidence(evidence)
+
+        # Legacy fallback: keeps old notebooks/helpers from breaking.
+        # Agent decisions should not rely on this fallback.
+        weighted_active = (
+            CONTEXT_MATCH_WEIGHT * evidence["context_matching_active"]
+            + OTHER_CONTEXT_WEIGHT * evidence["other_active"]
+        )
+        weighted_burned = (
+            CONTEXT_MATCH_WEIGHT * evidence["context_matching_burned"]
+            + OTHER_CONTEXT_WEIGHT * evidence["other_burned"]
+        )
+        score = self._calculate_trust_score(
+            weighted_active=weighted_active,
+            weighted_burned=weighted_burned,
+        )
+
+        return {
+            **evidence,
             "weighted_active": weighted_active,
             "weighted_burned": weighted_burned,
             "score": score,
-            "tnfts": active_tnfts,
-            "burned_tnfts": burned_tnfts,
-            "context_matching": context_matching_active_tnfts,
-            "other_tnfts": other_active_tnfts,
-            "context_matching_burned_tnfts": context_matching_burned_tnfts,
-            "other_burned_tnfts": other_burned_tnfts,
         }
 
     def get_reviewer_summary(self, reviewer_id: str) -> dict[str, Any]:
@@ -454,10 +487,9 @@ class BintWorldModel(mesa.Model):
     def query_vtp(self, agent_id: str) -> int:
         """Return the legacy active-token count used by older callers.
 
-        New code should prefer `get_vtp_summary()`, which returns a bounded trust
-        score and separates active and burned evidence.
+        New code should prefer trust evidence or agent-calculated trust summaries.
         """
-        return self.get_vtp_summary(agent_id)["total_active"]
+        return self.get_trust_evidence(agent_id)["total_active"]
 
     def burn_tnft(
         self, burner_id: str, target_id: str, service_type: str | None = None
