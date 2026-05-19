@@ -8,6 +8,7 @@ from profiles import (
     DEFAULT_MAX_STEPS,
     DEFAULT_TRUST_REJECT_THRESHOLD,
     DEFAULT_TRUST_ACCEPT_THRESHOLD,
+    DEFAULT_STAKING_ENABLED,
     SCENARIOS,
     get_agent_profiles,
 )
@@ -185,6 +186,7 @@ def make_bint_model(scenario_name: str = DEFAULT_SCENARIO) -> BintWorldModel:
         num_drop_offs=DEFAULT_NUM_DROP_OFFS,
         genesis_tokens=DEFAULT_GENESIS_TOKENS,
         max_steps=DEFAULT_MAX_STEPS,
+        staking_enabled=DEFAULT_STAKING_ENABLED,
         agent_profiles=get_agent_profiles(scenario_name),
     )
 
@@ -269,10 +271,15 @@ REASON_LABELS = {
     "requester_accepted": "requester accepted",
     "provider_rejected_low_vtp": "provider low VTP",
     "provider_rejected_low_reviewer_credibility": "provider reviewer risk",
+    "provider_rejected_insufficient_stake": "provider stake too low",
     "requester_rejected_low_vtp": "requester low VTP",
     "requester_rejected_low_reviewer_credibility": "requester reviewer risk",
+    "requester_rejected_insufficient_stake": "requester stake too low",
+    "stake_lock_failed": "stake lock failed",
     "rejected_unknown_target": "unknown target",
     "none": "none",
+    "provider_rejected_no_available_stake": "provider no stake",
+    "requester_rejected_no_available_stake": "requester no stake",
 }
 
 
@@ -464,6 +471,18 @@ def RunSummary(model: BintWorldModel, scenario_name: str) -> None:
 
     active_tnfts = sum(1 for tnft in model.tnft_ledger if tnft["status"])
     burned_tnfts = sum(1 for tnft in model.tnft_ledger if not tnft["status"])
+
+    staked_tnfts = sum(
+        1
+        for tnft in model.tnft_ledger
+        if tnft["status"] and tnft.get("staked_for") is not None
+    )
+    available_tnfts = sum(
+        1
+        for tnft in model.tnft_ledger
+        if tnft["status"] and tnft.get("staked_for") is None
+    )
+
     total_deliveries = sum(
         agent.delivery_count for agent in model.cached_delivery_agents
     )
@@ -488,6 +507,8 @@ def RunSummary(model: BintWorldModel, scenario_name: str) -> None:
 | Interactions | {len(model.interactions)} |
 | Outcomes | {len(model.outcomes)} |
 | Average map-data trust | {avg_trust:.3f} |
+| Available TNFTs | {available_tnfts} |
+| Staked TNFTs | {staked_tnfts} |
 """
         )
 
