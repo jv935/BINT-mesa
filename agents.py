@@ -2,9 +2,11 @@ import mesa
 from mesa.discrete_space import CellAgent, FixedAgent
 from typing_extensions import override
 from typing import Any, Literal, TypedDict
+from math import ceil
 
 Coordinate = tuple[int, int]
 AgentState = Literal["IDLE", "EXPLORING", "DELIVERING"]
+StakeRole = Literal["requester", "provider"]
 ReportedOutcomeStatus = Literal["success", "failure"]
 
 ENV_FLOOR = "floor"
@@ -31,6 +33,14 @@ class MapRecord(TypedDict):
     source: str
 
 
+class MapShareResponse(TypedDict):
+    coord: Coordinate
+    provider_stake_limit: int
+    requester_stake_required: int
+    provider_stake_limit_meta: dict[str, Any]
+    requester_stake_required_meta: dict[str, Any]
+
+
 class DeliveryAgent(CellAgent):
     def __init__(
         self,
@@ -47,6 +57,12 @@ class DeliveryAgent(CellAgent):
         trust_prior_burned: float = 1.0,
         burned_weight_multiplier: float = 1.0,
         filter_untrusted_evidence: bool = True,
+        staking_min_fraction: float = 0.25,
+        staking_max_fraction: float = 1.0,
+        provider_stake_vtp_weight: float = 0.8,
+        provider_stake_reviewer_weight: float = 0.2,
+        requester_stake_vtp_weight: float = 0.4,
+        requester_stake_reviewer_weight: float = 0.6,
     ) -> None:
         """
         An agent that delivers packages to drop-off locations. Can share map data with other agents.
@@ -118,6 +134,38 @@ class DeliveryAgent(CellAgent):
 
         if self.burned_weight_multiplier < 0:
             raise ValueError("burned_weight_multiplier must be >= 0.")
+
+        self.staking_min_fraction = self._validate_probability(
+            staking_min_fraction,
+            "staking_min_fraction",
+        )
+        self.staking_max_fraction = self._validate_probability(
+            staking_max_fraction,
+            "staking_max_fraction",
+        )
+
+        if self.staking_max_fraction < self.staking_min_fraction:
+            raise ValueError("staking_max_fraction must be >= staking_min_fraction.")
+
+        self.provider_stake_vtp_weight = float(provider_stake_vtp_weight)
+        self.provider_stake_reviewer_weight = float(provider_stake_reviewer_weight)
+        self.requester_stake_vtp_weight = float(requester_stake_vtp_weight)
+        self.requester_stake_reviewer_weight = float(requester_stake_reviewer_weight)
+
+        for name, value in (
+            ("provider_stake_vtp_weight", self.provider_stake_vtp_weight),
+            ("provider_stake_reviewer_weight", self.provider_stake_reviewer_weight),
+            ("requester_stake_vtp_weight", self.requester_stake_vtp_weight),
+            ("requester_stake_reviewer_weight", self.requester_stake_reviewer_weight),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be >= 0.")
+
+        if self.provider_stake_vtp_weight + self.provider_stake_reviewer_weight <= 0:
+            raise ValueError("Provider stake weights must have a positive total.")
+
+        if self.requester_stake_vtp_weight + self.requester_stake_reviewer_weight <= 0:
+            raise ValueError("Requester stake weights must have a positive total.")
 
         self.points = 0.0
         self.delivery_count = 0
@@ -365,6 +413,247 @@ class DeliveryAgent(CellAgent):
             + weighted_burned
         )
 
+    @staticmethod
+    def _clamp_probability(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    def _trust_score_to_risk(self, trust_score: float) -> float:
+        """Convert a trust score into a bounded risk value.
+
+        High trust means low risk.
+        Low trust means high risk.
+        Scores between the reject and accept thresholds scale linearly.
+        """
+        if trust_score >= self.trust_accept_threshold:
+            return 0.0
+
+        if trust_score <= self.trust_reject_threshold:
+            return 1.0
+
+        risk = (self.trust_accept_threshold - trust_score) / (
+            self.trust_accept_threshold - self.trust_reject_threshold
+        )
+        return self._clamp_probability(risk)
+
+    def _reviewer_summary_to_risk(self, reviewer_summary: dict[str, Any]) -> float:
+        """Convert reviewer history into a bounded risk value."""
+        if reviewer_summary["total_reviews"] < self.min_reviews_before_reviewer_check:
+            return 0.0
+
+        return self._clamp_probability(reviewer_summary["negative_review_rate"])
+
+    def _stake_weights_for_role(self, role: StakeRole) -> tuple[float, float]:
+        if role == "provider":
+            return self.provider_stake_vtp_weight, self.provider_stake_reviewer_weight
+
+        if role == "requester":
+            return self.requester_stake_vtp_weight, self.requester_stake_reviewer_weight
+
+        raise ValueError(f"Unknown stake role: {role}")
+
+    def calculate_interaction_risk(
+        self,
+        agent_id: str,
+        role: StakeRole,
+        service_type: str = MAP_DATA_SERVICE,
+    ) -> dict[str, Any]:
+        """Calculate how risky another agent looks in a specific interaction role."""
+        trust_summary = self.calculate_trust_summary(agent_id, service_type)
+        reviewer_summary = self.model.get_reviewer_summary(agent_id)
+
+        trust_score = trust_summary["score"]
+        vtp_risk = self._trust_score_to_risk(trust_score)
+        reviewer_risk = self._reviewer_summary_to_risk(reviewer_summary)
+
+        vtp_weight, reviewer_weight = self._stake_weights_for_role(role)
+        total_weight = vtp_weight + reviewer_weight
+
+        combined_risk = (
+            (vtp_weight * vtp_risk) + (reviewer_weight * reviewer_risk)
+        ) / total_weight
+
+        return {
+            "agent_id": agent_id,
+            "role": role,
+            "service_type": service_type,
+            "trust_score": trust_score,
+            "negative_review_rate": reviewer_summary["negative_review_rate"],
+            "total_reviews": reviewer_summary["total_reviews"],
+            "vtp_risk": vtp_risk,
+            "reviewer_risk": reviewer_risk,
+            "combined_risk": self._clamp_probability(combined_risk),
+            "vtp_weight": vtp_weight,
+            "reviewer_weight": reviewer_weight,
+        }
+
+    def _stake_fraction_from_risk(self, risk: float) -> float:
+        """Convert bounded risk into a stake fraction."""
+        if not getattr(self.model, "staking_enabled", False):
+            return 0.0
+
+        risk = self._clamp_probability(risk)
+
+        return self.staking_min_fraction + risk * (
+            self.staking_max_fraction - self.staking_min_fraction
+        )
+
+    def _stake_amount_from_risk(self, risk: float, available_stake: int) -> int:
+        """Convert bounded risk into an available-TNFT-relative stake amount."""
+        if not getattr(self.model, "staking_enabled", False):
+            return 0
+
+        available_stake = int(available_stake)
+
+        if available_stake <= 0:
+            return 0
+
+        stake_fraction = self._stake_fraction_from_risk(risk)
+        stake_amount = ceil(available_stake * stake_fraction)
+
+        return max(1, min(available_stake, stake_amount))
+
+    def calculate_required_stake(
+        self,
+        agent_id: str,
+        role: StakeRole,
+        service_type: str = MAP_DATA_SERVICE,
+    ) -> dict[str, Any]:
+        """Calculate how much stake this agent requires from another agent."""
+        risk_summary = self.calculate_interaction_risk(
+            agent_id=agent_id,
+            role=role,
+            service_type=service_type,
+        )
+
+        available_stake = self.model.available_stake_count(
+            agent_id,
+            service_type,
+        )
+        stake_fraction = self._stake_fraction_from_risk(risk_summary["combined_risk"])
+        required_stake = self._stake_amount_from_risk(
+            risk=risk_summary["combined_risk"],
+            available_stake=available_stake,
+        )
+
+        return {
+            **risk_summary,
+            "available_stake": available_stake,
+            "stake_fraction": stake_fraction,
+            "required_stake": required_stake,
+        }
+
+    def _stake_limit_fraction_from_risk(self, risk: float) -> float:
+        """Convert peer risk into a maximum stake fraction.
+
+        Higher peer risk means this agent is willing to risk less of its own stake.
+        """
+        if not getattr(self.model, "staking_enabled", False):
+            return 0.0
+
+        risk = self._clamp_probability(risk)
+
+        return self.staking_min_fraction + (1.0 - risk) * (
+            self.staking_max_fraction - self.staking_min_fraction
+        )
+
+    def _stake_amount_from_fraction(
+        self,
+        stake_fraction: float,
+        available_stake: int,
+    ) -> int:
+        if not getattr(self.model, "staking_enabled", False):
+            return 0
+
+        available_stake = int(available_stake)
+
+        if available_stake <= 0:
+            return 0
+
+        stake_fraction = self._clamp_probability(stake_fraction)
+        stake_amount = ceil(available_stake * stake_fraction)
+
+        return max(1, min(available_stake, stake_amount))
+
+    def calculate_stake_limit(
+        self,
+        peer_id: str,
+        peer_role: StakeRole,
+        service_type: str = MAP_DATA_SERVICE,
+    ) -> dict[str, Any]:
+        """Calculate the maximum stake this agent is willing to risk with a peer.
+
+        If the peer looks risky, this agent is willing to risk less.
+        If the peer looks trustworthy, this agent is willing to risk more.
+        """
+        risk_summary = self.calculate_interaction_risk(
+            agent_id=peer_id,
+            role=peer_role,
+            service_type=service_type,
+        )
+
+        available_stake = self.model.available_stake_count(
+            self.unique_id,
+            service_type,
+        )
+        stake_limit_fraction = self._stake_limit_fraction_from_risk(
+            risk_summary["combined_risk"]
+        )
+        stake_limit = self._stake_amount_from_fraction(
+            stake_fraction=stake_limit_fraction,
+            available_stake=available_stake,
+        )
+
+        return {
+            **risk_summary,
+            "available_stake": available_stake,
+            "stake_limit_fraction": stake_limit_fraction,
+            "stake_limit": stake_limit,
+        }
+
+    def accepts_stake_offer(
+        self,
+        agent_id: str,
+        role: StakeRole,
+        offered_stake: int,
+        service_type: str = MAP_DATA_SERVICE,
+    ) -> bool:
+        """Return whether another agent's stake offer is enough for this agent."""
+        if not getattr(self.model, "staking_enabled", False):
+            return True
+
+        stake_requirement = self.calculate_required_stake(
+            agent_id=agent_id,
+            role=role,
+            service_type=service_type,
+        )
+
+        return int(offered_stake) >= stake_requirement["required_stake"]
+
+    def build_map_share_response(
+        self,
+        requester: CellAgent,
+        coordinate: Coordinate,
+        service_type: str = MAP_DATA_SERVICE,
+    ) -> MapShareResponse:
+        provider_stake_limit = self.calculate_stake_limit(
+            peer_id=requester.unique_id,
+            peer_role="requester",
+            service_type=service_type,
+        )
+        requester_stake_required = self.calculate_required_stake(
+            agent_id=requester.unique_id,
+            role="requester",
+            service_type=service_type,
+        )
+
+        return {
+            "coord": coordinate,
+            "provider_stake_limit": provider_stake_limit["stake_limit"],
+            "requester_stake_required": requester_stake_required["required_stake"],
+            "provider_stake_limit_meta": provider_stake_limit,
+            "requester_stake_required_meta": requester_stake_required,
+        }
+
     def _accepts_trust_score(self, score: float) -> bool:
         """Decide whether this agent accepts another agent's ledger-derived score."""
         if score <= self.trust_reject_threshold:
@@ -518,6 +807,10 @@ class DeliveryAgent(CellAgent):
         self.package = None
 
     def _handle_bad_delivery_target(self) -> None:
+        bad_goal_name = self.goal_name
+        bad_coordinate = self.target_coordinate
+        bad_provider_id = self.current_provider_id
+
         outcome_meta = self.build_outcome_meta()
         outcome_meta["points_delta"] = 0.0
 
@@ -527,11 +820,28 @@ class DeliveryAgent(CellAgent):
             outcome_meta=outcome_meta,
         )
 
-        self._remove_drop_off_name(self.goal_name)
+        # The provider's coordinate failed for the current goal.
+        # Remove only the current goal mapping.
+        self._remove_drop_off_name(bad_goal_name)
 
-        if self.target_coordinate is not None:
-            self._remove_drop_off_coordinate(self.target_coordinate)
-            self.internal_map.pop(self.target_coordinate, None)
+        if bad_coordinate is None:
+            return
+
+        record = self.internal_map.get(bad_coordinate)
+
+        # If perception already proved what this coordinate is, keep that
+        # self/system-verified knowledge. Only remove stale provider-created
+        # coordinate records.
+        coordinate_still_has_name = any(
+            coord == bad_coordinate for coord in self.known_drop_offs.values()
+        ) or any(coord == bad_coordinate for coord in self.candidate_drop_offs.values())
+
+        if (
+            record is not None
+            and record["source"] == bad_provider_id
+            and not coordinate_still_has_name
+        ):
+            self.internal_map.pop(bad_coordinate, None)
 
     def decide_reported_outcome(
         self, actual_outcome_status: ReportedOutcomeStatus, outcome_meta: dict[str, Any]
@@ -663,7 +973,7 @@ class DeliveryAgent(CellAgent):
         elif drop_off_name not in self.known_drop_offs:
             self.candidate_drop_offs[drop_off_name] = coordinate
 
-    def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
+    def share_map(self, requester: CellAgent, target: str) -> MapShareResponse | None:
         if target not in self.known_drop_offs:
             self.record_decision(
                 decision_type="share_map",
@@ -678,7 +988,11 @@ class DeliveryAgent(CellAgent):
 
         coordinate = self.known_drop_offs[target]
 
-        return coordinate
+        return self.build_map_share_response(
+            requester=requester,
+            coordinate=coordinate,
+            service_type=MAP_DATA_SERVICE,
+        )
 
     def perceive_env(self) -> None:
         """
@@ -819,6 +1133,108 @@ class DeliveryAgent(CellAgent):
 
         return False
 
+    def evaluate_map_response_stakes(
+        self,
+        provider_id: str,
+        response: dict[str, Any],
+        service_type: str = MAP_DATA_SERVICE,
+    ) -> dict[str, Any]:
+        """Evaluate whether the staking terms in a provider response are acceptable."""
+        staking_enabled = getattr(self.model, "staking_enabled", False)
+
+        provider_stake_limit = int(response.get("provider_stake_limit", 0))
+        requester_stake_required = int(response.get("requester_stake_required", 0))
+
+        provider_stake_requirement = self.calculate_required_stake(
+            agent_id=provider_id,
+            role="provider",
+            service_type=service_type,
+        )
+        requester_stake_limit = self.calculate_stake_limit(
+            peer_id=provider_id,
+            peer_role="provider",
+            service_type=service_type,
+        )
+
+        provider_required = provider_stake_requirement["required_stake"]
+        requester_limit = requester_stake_limit["stake_limit"]
+
+        provider_available = provider_stake_requirement["available_stake"]
+        requester_available = requester_stake_limit["available_stake"]
+
+        provider_has_available_stake = not staking_enabled or provider_available > 0
+        requester_has_available_stake = not staking_enabled or requester_available > 0
+
+        provider_can_afford_required_stake = (
+            not staking_enabled or provider_available >= provider_required
+        )
+        requester_can_afford_required_stake = (
+            not staking_enabled or requester_available >= requester_stake_required
+        )
+
+        provider_willing_to_stake = (
+            not staking_enabled or provider_stake_limit >= provider_required
+        )
+        requester_willing_to_stake = (
+            not staking_enabled or requester_limit >= requester_stake_required
+        )
+
+        provider_stake_ok = (
+            provider_has_available_stake
+            and provider_can_afford_required_stake
+            and provider_willing_to_stake
+        )
+        requester_stake_ok = (
+            requester_has_available_stake
+            and requester_can_afford_required_stake
+            and requester_willing_to_stake
+        )
+
+        accepted = provider_stake_ok and requester_stake_ok
+
+        rejection_reason = None
+        if not provider_has_available_stake:
+            rejection_reason = "provider_rejected_no_available_stake"
+        elif not provider_can_afford_required_stake:
+            rejection_reason = "provider_rejected_insufficient_stake"
+        elif not provider_willing_to_stake:
+            rejection_reason = "provider_rejected_stake_limit"
+        elif not requester_has_available_stake:
+            rejection_reason = "requester_rejected_no_available_stake"
+        elif not requester_can_afford_required_stake:
+            rejection_reason = "requester_rejected_insufficient_stake"
+        elif not requester_willing_to_stake:
+            rejection_reason = "requester_rejected_stake_limit"
+
+        return {
+            "accepted": accepted,
+            "rejection_reason": rejection_reason,
+            "provider_stake_limit": provider_stake_limit,
+            "provider_stake_required": provider_required,
+            "requester_stake_limit": requester_limit,
+            "requester_stake_required": requester_stake_required,
+            "provider_stake_to_lock": provider_required if staking_enabled else 0,
+            "requester_stake_to_lock": (
+                requester_stake_required if staking_enabled else 0
+            ),
+            "provider_available_stake": provider_available,
+            "requester_available_stake": requester_available,
+            "provider_has_available_stake": provider_has_available_stake,
+            "requester_has_available_stake": requester_has_available_stake,
+            "provider_can_afford_required_stake": provider_can_afford_required_stake,
+            "requester_can_afford_required_stake": requester_can_afford_required_stake,
+            "provider_willing_to_stake": provider_willing_to_stake,
+            "requester_willing_to_stake": requester_willing_to_stake,
+            "provider_stake_requirement_meta": provider_stake_requirement,
+            "requester_stake_limit_meta": requester_stake_limit,
+            "provider_response_stake_limit_meta": response.get(
+                "provider_stake_limit_meta", {}
+            ),
+            "provider_response_requester_requirement_meta": response.get(
+                "requester_stake_required_meta", {}
+            ),
+        }
+
     def _accept_map_response(self, response: dict[str, Any]) -> bool:
         if self.goal_name is None:
             return False
@@ -859,6 +1275,67 @@ class DeliveryAgent(CellAgent):
             )
             return False
 
+        stake_terms = self.evaluate_map_response_stakes(
+            provider_id=provider_id,
+            response=response,
+            service_type=MAP_DATA_SERVICE,
+        )
+
+        if not stake_terms["accepted"]:
+            self.record_decision(
+                decision_type="accept_map_response",
+                reason=stake_terms["rejection_reason"],
+                peer_id=provider_id,
+                service_type=MAP_DATA_SERVICE,
+                trust_score=provider_trust_score,
+                negative_review_rate=provider_negative_review_rate,
+            )
+            return False
+
+        interaction_meta = {
+            "goal_name": self.goal_name,
+            "shared_coordinate": response["coord"],
+            "provider_distance": response["dist"],
+            "provider_stake_limit": stake_terms["provider_stake_limit"],
+            "provider_stake_required": stake_terms["provider_stake_required"],
+            "requester_stake_limit": stake_terms["requester_stake_limit"],
+            "requester_stake_required": stake_terms["requester_stake_required"],
+            "provider_available_stake": stake_terms["provider_available_stake"],
+            "requester_available_stake": stake_terms["requester_available_stake"],
+            "provider_willing_to_stake": stake_terms["provider_willing_to_stake"],
+            "requester_willing_to_stake": stake_terms["requester_willing_to_stake"],
+            "provider_stake_requirement_meta": stake_terms[
+                "provider_stake_requirement_meta"
+            ],
+            "requester_stake_limit_meta": stake_terms["requester_stake_limit_meta"],
+            "provider_response_stake_limit_meta": stake_terms[
+                "provider_response_stake_limit_meta"
+            ],
+            "provider_response_requester_requirement_meta": stake_terms[
+                "provider_response_requester_requirement_meta"
+            ],
+        }
+
+        interaction_id = self.model.record_staked_interaction(
+            truster_id=self.unique_id,
+            trustee_id=provider_id,
+            service_type=MAP_DATA_SERVICE,
+            truster_stake=stake_terms["requester_stake_to_lock"],
+            trustee_stake=stake_terms["provider_stake_to_lock"],
+            meta=interaction_meta,
+        )
+
+        if interaction_id is None:
+            self.record_decision(
+                decision_type="accept_map_response",
+                reason="stake_lock_failed",
+                peer_id=provider_id,
+                service_type=MAP_DATA_SERVICE,
+                trust_score=provider_trust_score,
+                negative_review_rate=provider_negative_review_rate,
+            )
+            return False
+
         self.update_internal_map(
             coordinate=response["coord"],
             env_type=ENV_DROP_OFF,
@@ -870,16 +1347,7 @@ class DeliveryAgent(CellAgent):
             return False
 
         self.current_provider_id = provider_id
-        self.current_interaction_id = self.model.record_interaction(
-            truster_id=self.unique_id,
-            trustee_id=provider_id,
-            service_type=MAP_DATA_SERVICE,
-            meta={
-                "goal_name": self.goal_name,
-                "shared_coordinate": response["coord"],
-                "provider_distance": response["dist"],
-            },
-        )
+        self.current_interaction_id = interaction_id
 
         self.record_decision(
             decision_type="accept_map_response",
@@ -930,6 +1398,12 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         trust_prior_burned: float = 1.0,
         burned_weight_multiplier: float = 1.0,
         filter_untrusted_evidence: bool = True,
+        staking_min_fraction: float = 0.25,
+        staking_max_fraction: float = 1.0,
+        provider_stake_vtp_weight: float = 0.8,
+        provider_stake_reviewer_weight: float = 0.2,
+        requester_stake_vtp_weight: float = 0.4,
+        requester_stake_reviewer_weight: float = 0.6,
         false_map_probability: float = 0.5,
         false_negative_review_probability: float = 0.5,
         false_positive_review_probability: float = 0.5,
@@ -947,6 +1421,13 @@ class MaliciousDeliveryAgent(DeliveryAgent):
             trust_prior_active=trust_prior_active,
             trust_prior_burned=trust_prior_burned,
             burned_weight_multiplier=burned_weight_multiplier,
+            filter_untrusted_evidence=filter_untrusted_evidence,
+            staking_min_fraction=staking_min_fraction,
+            staking_max_fraction=staking_max_fraction,
+            provider_stake_vtp_weight=provider_stake_vtp_weight,
+            provider_stake_reviewer_weight=provider_stake_reviewer_weight,
+            requester_stake_vtp_weight=requester_stake_vtp_weight,
+            requester_stake_reviewer_weight=requester_stake_reviewer_weight,
         )
 
         self.false_map_probability = self._validate_probability(
@@ -963,7 +1444,7 @@ class MaliciousDeliveryAgent(DeliveryAgent):
         )
 
     @override
-    def share_map(self, requester: CellAgent, target: str) -> Coordinate | None:
+    def share_map(self, requester: CellAgent, target: str) -> MapShareResponse | None:
         target_is_known = target in self.known_drop_offs
 
         if not target_is_known:
@@ -971,9 +1452,15 @@ class MaliciousDeliveryAgent(DeliveryAgent):
                 return None
 
             if self._draw_probability(self.false_map_probability):
-                return (
+                coordinate = (
                     self.random.randint(0, self.model.grid.width - 1),
                     self.random.randint(0, self.model.grid.height - 1),
+                )
+
+                return self.build_map_share_response(
+                    requester=requester,
+                    coordinate=coordinate,
+                    service_type=MAP_DATA_SERVICE,
                 )
 
             self.record_decision(
@@ -988,12 +1475,22 @@ class MaliciousDeliveryAgent(DeliveryAgent):
             return None
 
         if self._draw_probability(self.false_map_probability):
-            return (
+            coordinate = (
                 self.random.randint(0, self.model.grid.width - 1),
                 self.random.randint(0, self.model.grid.height - 1),
             )
 
-        return self.known_drop_offs[target]
+            return self.build_map_share_response(
+                requester=requester,
+                coordinate=coordinate,
+                service_type=MAP_DATA_SERVICE,
+            )
+
+        return self.build_map_share_response(
+            requester=requester,
+            coordinate=self.known_drop_offs[target],
+            service_type=MAP_DATA_SERVICE,
+        )
 
     @override
     def decide_reported_outcome(
