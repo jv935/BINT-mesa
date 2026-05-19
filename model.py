@@ -81,6 +81,7 @@ class BintWorldModel(mesa.Model):
         height: int = 100,
         genesis_tokens: int = 1,
         max_steps: int = 1500,
+        staking_enabled: bool = True,
         rng: int | str | None = None,
     ) -> None:
 
@@ -93,6 +94,7 @@ class BintWorldModel(mesa.Model):
 
         self.num_drop_offs = int(num_drop_offs)
         self.genesis_tokens = int(genesis_tokens)
+        self.staking_enabled = bool(staking_enabled)
 
         # use defaults if none are provided
         if agent_profiles is None:
@@ -188,6 +190,80 @@ class BintWorldModel(mesa.Model):
         )
         return interaction_id
 
+    def record_staked_interaction(
+        self,
+        truster_id: str,
+        trustee_id: str,
+        service_type: str,
+        truster_stake: int,
+        trustee_stake: int,
+        meta: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Create an interaction and lock both agents' stake.
+
+        Returns the interaction id if successful.
+        Returns None if either side cannot provide the requested stake.
+        """
+        truster_stake = int(truster_stake)
+        trustee_stake = int(trustee_stake)
+
+        if truster_stake < 0 or trustee_stake < 0:
+            raise ValueError("Stake amounts must be >= 0.")
+
+        interaction_meta = dict(meta or {})
+        interaction_meta.update(
+            {
+                "staking_enabled": self.staking_enabled,
+                "truster_stake_requested": truster_stake,
+                "trustee_stake_requested": trustee_stake,
+                "truster_stake_ids": [],
+                "trustee_stake_ids": [],
+            }
+        )
+
+        interaction_id = self.record_interaction(
+            truster_id=truster_id,
+            trustee_id=trustee_id,
+            service_type=service_type,
+            meta=interaction_meta,
+        )
+
+        if not self.staking_enabled:
+            return interaction_id
+
+        truster_stake_ids = self._lock_stake(
+            agent_id=truster_id,
+            interaction_id=interaction_id,
+            amount=truster_stake,
+            role="truster",
+            service_type=service_type,
+        )
+
+        if truster_stake_ids is None:
+            self.interactions.pop(interaction_id, None)
+            return None
+
+        trustee_stake_ids = self._lock_stake(
+            agent_id=trustee_id,
+            interaction_id=interaction_id,
+            amount=trustee_stake,
+            role="trustee",
+            service_type=service_type,
+        )
+
+        if trustee_stake_ids is None:
+            self.release_interaction_stakes(interaction_id)
+            self.interactions.pop(interaction_id, None)
+            return None
+
+        interaction = self.interactions[interaction_id]
+        interaction.meta["truster_stake_ids"] = truster_stake_ids
+        interaction.meta["trustee_stake_ids"] = trustee_stake_ids
+        interaction.meta["truster_stake_locked"] = len(truster_stake_ids)
+        interaction.meta["trustee_stake_locked"] = len(trustee_stake_ids)
+
+        return interaction_id
+
     def get_interaction(self, interaction_id: str) -> InteractionRecord | None:
         return self.interactions.get(interaction_id)
 
@@ -241,11 +317,20 @@ class BintWorldModel(mesa.Model):
         self, interaction: InteractionRecord, outcome: OutcomeRecord, evaluator_id: str
     ) -> None:
         if outcome.status == "success":
+            self.release_interaction_stakes(interaction.interaction_id)
             self._reward_successful_interaction(interaction, outcome, evaluator_id)
             interaction.status = "completed"
             return
 
         if outcome.status == "failure":
+            if self.staking_enabled:
+                burned_count = self.burn_interaction_stakes(
+                    interaction_id=interaction.interaction_id,
+                    burner_id=evaluator_id,
+                )
+                interaction.status = "completed" if burned_count > 0 else "cancelled"
+                return
+
             burned = self.burn_tnft(
                 burner_id=evaluator_id,
                 target_id=interaction.trustee_id,
@@ -254,6 +339,7 @@ class BintWorldModel(mesa.Model):
             interaction.status = "completed" if burned else "cancelled"
             return
 
+        self.release_interaction_stakes(interaction.interaction_id)
         interaction.status = "cancelled"
 
     def _reward_successful_interaction(
@@ -304,6 +390,9 @@ class BintWorldModel(mesa.Model):
             "metadata": meta or {},
             "status": True,  # True means active, False means burned
             "timestamp": self.time,
+            "staked_for": None,
+            "stake_role": None,
+            "stake_service_type": None,
         }
         self.tnft_ledger.append(tnft)
 
@@ -380,6 +469,122 @@ class BintWorldModel(mesa.Model):
             "context_matching_burned_tnfts": context_matching_burned_tnfts,
             "other_burned_tnfts": other_burned_tnfts,
         }
+
+    def get_available_stake_tnfts(
+        self,
+        agent_id: str,
+        service_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return active, unstaked TNFTs that can be used as collateral.
+
+        Staked TNFTs still count as active reputation, but they cannot be reused
+        as collateral for another pending interaction.
+        """
+        available_tnfts = [
+            tnft
+            for tnft in self.tnft_ledger
+            if tnft["owner"] == agent_id
+            and tnft["status"]
+            and tnft.get("staked_for") is None
+        ]
+
+        if service_type is None:
+            return sorted(available_tnfts, key=lambda tnft: tnft["id"])
+
+        def stake_priority(tnft: dict[str, Any]) -> tuple[int, int]:
+            if tnft["service_type"] == service_type:
+                return (0, tnft["id"])
+            if tnft["service_type"] == BOOTSTRAP_SERVICE:
+                return (1, tnft["id"])
+            return (2, tnft["id"])
+
+        return sorted(available_tnfts, key=stake_priority)
+
+    def available_stake_count(
+        self,
+        agent_id: str,
+        service_type: str | None = None,
+    ) -> int:
+        return len(self.get_available_stake_tnfts(agent_id, service_type))
+
+    def _lock_stake(
+        self,
+        agent_id: str,
+        interaction_id: str,
+        amount: int,
+        role: str,
+        service_type: str,
+    ) -> list[int] | None:
+        amount = int(amount)
+
+        if amount < 0:
+            raise ValueError("Stake amount must be >= 0.")
+
+        if amount == 0:
+            return []
+
+        available_tnfts = self.get_available_stake_tnfts(agent_id, service_type)
+
+        if len(available_tnfts) < amount:
+            return None
+
+        selected_tnfts = available_tnfts[:amount]
+
+        for tnft in selected_tnfts:
+            tnft["staked_for"] = interaction_id
+            tnft["stake_role"] = role
+            tnft["stake_service_type"] = service_type
+
+        return [tnft["id"] for tnft in selected_tnfts]
+
+    def release_interaction_stakes(self, interaction_id: str) -> None:
+        """Release all active TNFTs staked for an interaction."""
+        for tnft in self.tnft_ledger:
+            if tnft.get("staked_for") != interaction_id:
+                continue
+
+            if not tnft["status"]:
+                continue
+
+            tnft["staked_for"] = None
+            tnft["stake_role"] = None
+            tnft["stake_service_type"] = None
+
+    def burn_interaction_stakes(
+        self,
+        interaction_id: str,
+        burner_id: str,
+    ) -> int:
+        """Burn all active TNFTs staked for an interaction."""
+        burned_count = 0
+
+        for tnft in self.tnft_ledger:
+            if tnft.get("staked_for") != interaction_id:
+                continue
+
+            if not tnft["status"]:
+                continue
+
+            tnft["status"] = False
+            tnft["burned_by"] = burner_id
+            tnft["burn_timestamp"] = self.time
+            tnft["burn_reason"] = "staked_interaction_failure"
+
+            tnft["staked_for"] = None
+            tnft["stake_role"] = None
+            tnft["stake_service_type"] = None
+
+            target_agent = self._find_delivery_agent(tnft["owner"])
+            if target_agent is not None:
+                target_agent.cached_active_tnfts = max(
+                    0,
+                    target_agent.cached_active_tnfts - 1,
+                )
+                target_agent.cached_burned_tnfts += 1
+
+            burned_count += 1
+
+        return burned_count
 
     def get_vtp_summary(
         self,
@@ -576,7 +781,15 @@ class BintWorldModel(mesa.Model):
                 {
                     "agent": agent.unique_id,
                     "dist": provider_distance,
-                    "coord": agent_resp,
+                    "coord": agent_resp["coord"],
+                    "provider_stake_limit": agent_resp["provider_stake_limit"],
+                    "requester_stake_required": agent_resp["requester_stake_required"],
+                    "provider_stake_limit_meta": agent_resp[
+                        "provider_stake_limit_meta"
+                    ],
+                    "requester_stake_required_meta": agent_resp[
+                        "requester_stake_required_meta"
+                    ],
                 }
             )
 
@@ -627,7 +840,8 @@ class BintWorldModel(mesa.Model):
                 agent.cell.coordinate, new_destination.cell.coordinate
             )
             max_steps_to_destination = int(
-                min_steps_to_destination * (self.random.betavariate(5, 5) + 1) + 1
+                # min_steps_to_destination * (self.random.betavariate(5, 5) + 1) + 1
+                min_steps_to_destination * 2
             )
 
             package = {
@@ -668,7 +882,9 @@ class BintWorldModel(mesa.Model):
 
         else:
             lateness = steps_taken - max_steps
-            points_awarded = max((-max_steps * 2), (-lateness * LATE_PENALTY_PER_STEP))
+            points_awarded = max(
+                (-BASE_DELIVERY_POINTS * 2), (-lateness * LATE_PENALTY_PER_STEP)
+            )
 
         agent.points += points_awarded
         return True
