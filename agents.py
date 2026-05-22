@@ -232,6 +232,22 @@ class DeliveryAgent(CellAgent):
         self.last_checked_trust_score = trust_score
         self.last_checked_negative_review_rate = negative_review_rate
 
+        if hasattr(self.model, "decision_events"):
+            self.model.decision_events.append(
+                {
+                    "timestamp": getattr(self.model, "time", None),
+                    "step": getattr(self.model, "steps", None),
+                    "agent_id": self.unique_id,
+                    "agent_type": type(self).__name__,
+                    "decision_type": decision_type,
+                    "reason": reason,
+                    "peer_id": peer_id,
+                    "service_type": service_type,
+                    "trust_score": trust_score,
+                    "negative_review_rate": negative_review_rate,
+                }
+            )
+
     def calculate_trust_summary(
         self,
         target_id: str,

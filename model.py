@@ -141,6 +141,7 @@ class BintWorldModel(mesa.Model):
         self.interaction_counter = 0
         self.interactions: dict[str, InteractionRecord] = {}
         self.outcomes: dict[str, OutcomeRecord] = {}
+        self.decision_events: list[dict[str, Any]] = []
 
     def _spawn_agents(self) -> None:
         spawn_index = 0
