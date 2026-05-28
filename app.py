@@ -179,7 +179,7 @@ DEFAULT_SCENARIO = "aggressive_malicious"
 
 
 def make_bint_model(scenario_name: str = DEFAULT_SCENARIO) -> BintWorldModel:
-    return BintWorldModel(
+    model = BintWorldModel(
         rng=DEFAULT_RNG,
         width=DEFAULT_WIDTH,
         height=DEFAULT_HEIGHT,
@@ -189,6 +189,9 @@ def make_bint_model(scenario_name: str = DEFAULT_SCENARIO) -> BintWorldModel:
         staking_enabled=DEFAULT_STAKING_ENABLED,
         agent_profiles=get_agent_profiles(scenario_name),
     )
+    # Store the scenario name so dashboard components can display it correctly.
+    model.scenario_name = scenario_name
+    return model
 
 
 # -----------------------------------------------------------------------------
@@ -242,7 +245,10 @@ def _scatter_agents(
 
 
 def _trust_score(model: BintWorldModel, agent: DeliveryAgent) -> float:
-    return float(model.get_vtp_summary(agent.unique_id, MAP_DATA_SERVICE)["score"])
+    # get_vtp_summary requires an evaluator since 0f20b7a.
+    # Using the agent itself as evaluator gives its own perspective on its
+    # trustworthiness — the same weighting it uses for live decisions.
+    return float(model.get_vtp_summary(agent.unique_id, MAP_DATA_SERVICE, evaluator=agent)["score"])
 
 
 def _format_optional_float(value: float | None, digits: int = 3) -> str:
@@ -515,7 +521,8 @@ def RunSummary(model: BintWorldModel, scenario_name: str) -> None:
 
 @solara.component
 def RunSummaryPanel(model: BintWorldModel) -> None:
-    RunSummary(model, DEFAULT_SCENARIO)
+    scenario = getattr(model, "scenario_name", DEFAULT_SCENARIO)
+    RunSummary(model, scenario)
 
 
 @solara.component
@@ -527,7 +534,7 @@ def AgentDecisions(model: BintWorldModel) -> None:
 
     rows = []
     for agent in model.cached_delivery_agents:
-        vtp_summary = model.get_vtp_summary(agent.unique_id, MAP_DATA_SERVICE)
+        vtp_summary = model.get_vtp_summary(agent.unique_id, MAP_DATA_SERVICE, evaluator=agent)
         reviewer_summary = model.get_reviewer_summary(agent.unique_id)
 
         rows.append(
@@ -584,7 +591,7 @@ def Dashboard(model: BintWorldModel) -> None:
     with solara.Column(classes=["bint-dashboard"]):
         DynamicMap(model)
         with solara.Row(classes=["bint-lower-panel"]):
-            RunSummary(model, DEFAULT_SCENARIO)
+            RunSummary(model, getattr(model, "scenario_name", DEFAULT_SCENARIO))
             CurrentTrustScores(model)
         AgentDecisions(model)
 

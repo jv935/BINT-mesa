@@ -403,7 +403,10 @@ class BintWorldModel(mesa.Model):
                     interaction_id=interaction.interaction_id,
                     burner_id=evaluator_id,
                 )
-                interaction.status = "completed" if burned_count > 0 else "cancelled"
+                # The outcome was already recorded regardless of how many tokens
+                # were burned. Mark as completed in both cases; cancelled is only
+                # appropriate when settlement itself could not proceed.
+                interaction.status = "completed"
                 return
 
             burned = self.burn_tnft(
@@ -795,6 +798,7 @@ class BintWorldModel(mesa.Model):
         tnft_to_burn["status"] = False
         tnft_to_burn["burned_by"] = burner_id
         tnft_to_burn["burn_timestamp"] = self.time
+        tnft_to_burn["burn_reason"] = "interaction_failure"
 
         # Perf J: update burned-by index and invalidate trust score cache.
         self._tokens_burned_by[burner_id].add(target_id)
@@ -916,7 +920,7 @@ class BintWorldModel(mesa.Model):
     def dispatch_packages(self) -> None:
         """
         Randomly assign new delivery goals for each agent.
-        Will not assign the same goal as lsat time.
+        Will not assign the same goal as last time.
         """
         if not self.cached_delivery_agents or not self.cached_drop_offs:
             return

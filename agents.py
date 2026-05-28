@@ -1544,6 +1544,12 @@ class MaliciousDeliveryAgent(DeliveryAgent):
             self.random.randint(0, self.model.grid.width - 1),
             self.random.randint(0, self.model.grid.height - 1),
         )
+        self.record_decision(
+            decision_type="share_map",
+            reason="shared_false_map",
+            peer_id=requester.unique_id,
+            service_type=MAP_DATA_SERVICE,
+        )
         return self.build_map_share_response(
             requester=requester,
             coordinate=coordinate,
