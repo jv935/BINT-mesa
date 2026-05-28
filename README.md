@@ -113,6 +113,26 @@ pip install -r requirements.txt
 
 ---
 
+### Docker (alternative)
+
+If you have [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed,
+no Python setup is required.
+
+```bash
+# First build (takes ~10 minutes the first time)
+docker compose build
+
+# Run the dashboard
+docker compose up dashboard   # → http://localhost:8765
+
+# Run the notebooks
+docker compose up notebooks   # → http://localhost:8888
+```
+
+Results written by the notebooks are saved to `results/` on your local machine.
+
+---
+
 ## Running the Project
 
 ### Interactive Dashboard
