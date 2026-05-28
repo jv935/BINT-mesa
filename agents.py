@@ -232,7 +232,16 @@ class DeliveryAgent(CellAgent):
         self.last_checked_trust_score = trust_score
         self.last_checked_negative_review_rate = negative_review_rate
 
-        if hasattr(self.model, "decision_events"):
+        # Perf F: increment the O(1) reason counter on the model.
+        # This replaces the need to iterate decision_events for counting.
+        if hasattr(self.model, "_decision_counts"):
+            counts = self.model._decision_counts
+            counts[reason] = counts.get(reason, 0) + 1
+
+        # Keep the full event list only when DEBUG_DECISIONS is set.
+        # In production runs this list is left empty, saving ~2M dict
+        # allocations per run and significant GC pressure.
+        if getattr(self.model, "DEBUG_DECISIONS", False) and hasattr(self.model, "decision_events"):
             self.model.decision_events.append(
                 {
                     "timestamp": getattr(self.model, "time", None),
@@ -258,12 +267,38 @@ class DeliveryAgent(CellAgent):
 
         The model supplies raw ledger evidence. This agent decides how that
         evidence should be filtered, weighted, and converted into a trust score.
+
+        Perf J: results are cached on the model keyed by
+        (evaluator_id, target_id, service_type, filter_flag). The cache is
+        invalidated precisely in _invalidate_trust_score_cache whenever
+        a TNFT state change could affect this score.
         """
-        evidence = self.model.get_trust_evidence(target_id, service_type)
-        return self.calculate_trust_summary_from_evidence(
-            evidence=evidence,
-            filter_untrusted_evidence=filter_untrusted_evidence,
+        # Resolve filter flag early — it is part of the cache key.
+        _use_filter: bool = (
+            self.filter_untrusted_evidence
+            if filter_untrusted_evidence is None
+            else bool(filter_untrusted_evidence)
         )
+
+        # Perf J: check trust score cache.
+        _tsc = getattr(self.model, "_trust_score_cache", None)
+        if _tsc is not None:
+            _key = (self.unique_id, target_id, service_type, _use_filter)
+            _cached = _tsc.get(_key)
+            if _cached is not None:
+                return _cached
+
+        evidence = self.model.get_trust_evidence(target_id, service_type)
+        result = self.calculate_trust_summary_from_evidence(
+            evidence=evidence,
+            filter_untrusted_evidence=_use_filter,
+        )
+
+        # Perf J: store result.
+        if _tsc is not None:
+            _tsc[(self.unique_id, target_id, service_type, _use_filter)] = result
+
+        return result
 
     def calculate_trust_summary_from_evidence(
         self,
@@ -708,10 +743,7 @@ class DeliveryAgent(CellAgent):
             return False
 
         # TODO: maybe we should always have this check, even when the other agent isn't leaving a review?
-        if (
-            reviewer_summary["total_reviews"] >= self.min_reviews_before_reviewer_check
-            and negative_review_rate > self.max_negative_review_rate
-        ):
+        if not self.verify_credibility(requester.unique_id):
             self.record_decision(
                 decision_type="share_map",
                 reason="requester_rejected_low_reviewer_credibility",
@@ -882,8 +914,15 @@ class DeliveryAgent(CellAgent):
         points_delta: float,
         outcome_meta: dict | None = None,
     ) -> None:
-        if self.current_interaction_id is None:
+        interaction_id = self.current_interaction_id
+
+        if interaction_id is None:
             return
+
+        # Clear the reference before notifying the model so the method is
+        # self-contained — callers do not need to follow this with
+        # _clear_current_target to avoid a double-settle.
+        self.current_interaction_id = None
 
         outcome_meta = (
             dict(outcome_meta)
@@ -897,7 +936,7 @@ class DeliveryAgent(CellAgent):
         )
 
         self.model.settle_interaction(
-            interaction_id=self.current_interaction_id,
+            interaction_id=interaction_id,
             evaluator_id=self.unique_id,
             outcome_status=reported_outcome_status,
             outcome_meta=reported_outcome_meta,
@@ -1229,6 +1268,9 @@ class DeliveryAgent(CellAgent):
             "provider_stake_required": provider_required,
             "requester_stake_limit": requester_limit,
             "requester_stake_required": requester_stake_required,
+            # Lock exactly what's required, not the full offered ceiling.
+            # provider_willing_to_stake already guarantees the offer covers
+            # provider_required, so locking the exact requirement is sufficient.
             "provider_stake_to_lock": provider_required if staking_enabled else 0,
             "requester_stake_to_lock": (
                 requester_stake_required if staking_enabled else 0
@@ -1276,11 +1318,7 @@ class DeliveryAgent(CellAgent):
             )
             return False
 
-        if (
-            provider_reviewer_summary["total_reviews"]
-            >= self.min_reviews_before_reviewer_check
-            and provider_negative_review_rate > self.max_negative_review_rate
-        ):
+        if not self.verify_credibility(provider_id):
             self.record_decision(
                 decision_type="accept_map_response",
                 reason="provider_rejected_low_reviewer_credibility",
@@ -1352,6 +1390,9 @@ class DeliveryAgent(CellAgent):
             )
             return False
 
+        self.current_provider_id = provider_id
+        self.current_interaction_id = interaction_id
+
         self.update_internal_map(
             coordinate=response["coord"],
             env_type=ENV_DROP_OFF,
@@ -1360,10 +1401,20 @@ class DeliveryAgent(CellAgent):
         )
 
         if self._get_goal_coordinate(self.goal_name) is None:
+            # The agent already has verified knowledge that this coordinate is
+            # not a drop-off, so the provider's info is provably wrong.
+            # Treat this identically to arriving at the wrong destination.
+            outcome_meta = self.build_outcome_meta()
+            outcome_meta["points_delta"] = 0.0
+            outcome_meta["failure_reason"] = "provider_coordinate_immediately_disproved"
+            self._settle_current_interaction(
+                outcome_status="failure",
+                points_delta=0.0,
+                outcome_meta=outcome_meta,
+            )
+            self._remove_drop_off_name(self.goal_name)
+            self.current_provider_id = None
             return False
-
-        self.current_provider_id = provider_id
-        self.current_interaction_id = interaction_id
 
         self.record_decision(
             decision_type="accept_map_response",
@@ -1463,48 +1514,39 @@ class MaliciousDeliveryAgent(DeliveryAgent):
     def share_map(self, requester: CellAgent, target: str) -> MapShareResponse | None:
         target_is_known = target in self.known_drop_offs
 
-        if not target_is_known:
-            if not self.accepts_requester_for_service(requester, MAP_DATA_SERVICE):
-                return None
-
-            if self._draw_probability(self.false_map_probability):
-                coordinate = (
-                    self.random.randint(0, self.model.grid.width - 1),
-                    self.random.randint(0, self.model.grid.height - 1),
-                )
-
-                return self.build_map_share_response(
-                    requester=requester,
-                    coordinate=coordinate,
-                    service_type=MAP_DATA_SERVICE,
-                )
-
-            self.record_decision(
-                decision_type="share_map",
-                reason="rejected_unknown_target",
-                peer_id=requester.unique_id,
-                service_type=MAP_DATA_SERVICE,
-            )
-            return None
-
         if not self.accepts_requester_for_service(requester, MAP_DATA_SERVICE):
             return None
 
-        if self._draw_probability(self.false_map_probability):
-            coordinate = (
-                self.random.randint(0, self.model.grid.width - 1),
-                self.random.randint(0, self.model.grid.height - 1),
-            )
-
+        # false_map_probability governs ALL fabrication — both for known and
+        # unknown targets.  This ensures false_map_probability=0.0 is a clean
+        # "no map attack" baseline: even when the target is unknown, a
+        # non-attacking malicious agent declines honestly (returns None),
+        # exactly as an honest agent would.  false_map_probability=1.0 means
+        # always fabricate, regardless of whether the target is known.
+        if not self._draw_probability(self.false_map_probability):
+            # Not lying this interaction: behave like an honest agent.
+            if not target_is_known:
+                self.record_decision(
+                    decision_type="share_map",
+                    reason="rejected_unknown_target",
+                    peer_id=requester.unique_id,
+                    service_type=MAP_DATA_SERVICE,
+                )
+                return None
             return self.build_map_share_response(
                 requester=requester,
-                coordinate=coordinate,
+                coordinate=self.known_drop_offs[target],
                 service_type=MAP_DATA_SERVICE,
             )
 
+        # Lying this interaction: fabricate a random coordinate.
+        coordinate = (
+            self.random.randint(0, self.model.grid.width - 1),
+            self.random.randint(0, self.model.grid.height - 1),
+        )
         return self.build_map_share_response(
             requester=requester,
-            coordinate=self.known_drop_offs[target],
+            coordinate=coordinate,
             service_type=MAP_DATA_SERVICE,
         )
 

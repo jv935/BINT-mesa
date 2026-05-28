@@ -1,11 +1,14 @@
 import mesa
 from mesa.discrete_space import OrthogonalMooreGrid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Literal, Any
 from agents import (
     DeliveryAgent,
     DropOffLocationAgent,
     MaliciousDeliveryAgent,
+    ENV_DROP_OFF,
+    SOURCE_SYSTEM,
 )
 
 Coordinate = tuple[int, int]
@@ -15,13 +18,6 @@ OutcomeStatus = Literal["success", "failure", "disputed"]
 MAP_DATA_SERVICE = "map_data"
 SYSTEM_ISSUER_ID = "SYSTEM"
 
-# Trust uses a bounded Beta-style score:
-# active TNFTs are positive evidence, burned TNFTs are negative evidence.
-# Context-matching evidence counts more than evidence from other services.
-CONTEXT_MATCH_WEIGHT = 1.0
-OTHER_CONTEXT_WEIGHT = 0.25
-TRUST_PRIOR_ACTIVE = 1.0
-TRUST_PRIOR_BURNED = 1.0
 BOOTSTRAP_SERVICE = "bootstrap"
 
 BASE_DELIVERY_POINTS = 10.0
@@ -143,6 +139,65 @@ class BintWorldModel(mesa.Model):
         self.outcomes: dict[str, OutcomeRecord] = {}
         self.decision_events: list[dict[str, Any]] = []
 
+        # Fix A: per-owner index. Same dict objects as tnft_ledger, so in-place
+        # mutations (burn, stake, release) are automatically reflected here.
+        # Only needs updating on mint (when a new object is created).
+        self._ledger_by_owner: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+
+        # Fix B: per-interaction stake index, populated in _lock_stake,
+        # consumed and popped in release_interaction_stakes / burn_interaction_stakes.
+        self._staked_by_interaction: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+
+        # Fix C: O(1) outcome counters replacing O(n) outcome-dict iteration.
+        self._n_success: int = 0
+        self._n_failure: int = 0
+        self._n_false_reviews: int = 0
+
+        # Perf D: reviewer summary cache — invalidated in record_outcome.
+        # get_reviewer_summary is called on every map request (O(interactions)
+        # per call); caching reduces it to O(1) for repeated reads.
+        self._reviewer_cache: dict[str, dict] = {}
+
+        # Perf E: agent lookup index — O(1) instead of O(n) linear scan.
+        # Populated in _cache_agents after all agents are spawned.
+        self._agent_index: dict[str, 'DeliveryAgent'] = {}
+
+        # Perf F: decision reason Counter — replaces the full event list
+        # for the purpose of reason counting (list kept for optional debug).
+        self._decision_counts: dict[str, int] = {}
+
+        # Perf G: trust evidence cache — keyed by (agent_id, service_type).
+        # get_trust_evidence is called on every trust evaluation; caching
+        # avoids repeated list comprehensions over _ledger_by_owner.
+        # Invalidated in mint_tnft (new token) and burn_tnft /
+        # burn_interaction_stakes (status change). Lock/release stake does
+        # NOT change active/burned status, so no invalidation needed there.
+        self._trust_evidence_cache: dict[tuple, dict] = {}
+
+        # Perf H: drop-off coordinate index — O(1) instead of O(n) scan.
+        # Populated in _cache_agents after drop-off agents are spawned.
+        self._dropoff_index: dict[str, 'DropOffLocationAgent'] = {}
+
+        # Perf J: trust SCORE cache.
+        # Key: (evaluator_id, target_id, service_type, filter_flag)
+        # This layers on top of Perf G (evidence cache) and additionally
+        # avoids repeating _filter_untrusted_trust_evidence + recursive
+        # issuer lookups for the same (evaluator, target) pair.
+        #
+        # Invalidation is TARGETED and uses two monotonic indexes:
+        #   _tokens_by_issuer[X]  = agents that hold tokens ISSUED BY X
+        #   _tokens_burned_by[X]  = agents that had a token BURNED BY X
+        # When X's token state changes, we invalidate:
+        #   - all entries where target == X (direct: X's score changed)
+        #   - filter=True entries where target in _tokens_by_issuer[X]
+        #     (issuer X's score is re-checked in _filter_untrusted_trust_evidence)
+        #   - filter=True entries where target in _tokens_burned_by[X]
+        #     (burn evidence is filtered by burned_by identity)
+        # filter=False entries for targets ≠ X are always safe to keep.
+        self._trust_score_cache: dict[tuple, dict] = {}
+        self._tokens_by_issuer:  defaultdict[str, set] = defaultdict(set)
+        self._tokens_burned_by:  defaultdict[str, set] = defaultdict(set)
+
     def _spawn_agents(self) -> None:
         spawn_index = 0
 
@@ -169,6 +224,10 @@ class BintWorldModel(mesa.Model):
         self.cached_delivery_agents = [
             agent for agent in self.agents if isinstance(agent, DeliveryAgent)
         ]
+        # Perf E: build O(1) lookup index after the agent list is finalised.
+        self._agent_index = {a.unique_id: a for a in self.cached_delivery_agents}
+        # Perf H: drop-off coordinate index.
+        self._dropoff_index = {d.unique_id: d for d in self.cached_drop_offs}
 
     def record_interaction(
         self,
@@ -285,6 +344,21 @@ class BintWorldModel(mesa.Model):
         )
 
         self.outcomes[interaction_id] = outcome
+
+        # Fix C: maintain O(1)-readable outcome counters.
+        if status == "success":
+            self._n_success += 1
+        elif status == "failure":
+            self._n_failure += 1
+        if (meta or {}).get("review_was_false"):
+            self._n_false_reviews += 1
+
+        # Perf D: invalidate reviewer cache for the truster of this interaction.
+        # The truster is the agent who reported the outcome (the reviewer).
+        interaction_record = self.interactions.get(interaction_id)
+        if interaction_record is not None:
+            self._reviewer_cache.pop(interaction_record.truster_id, None)
+
         return outcome
 
     def settle_interaction(
@@ -396,6 +470,14 @@ class BintWorldModel(mesa.Model):
             "stake_service_type": None,
         }
         self.tnft_ledger.append(tnft)
+        self._ledger_by_owner[receiver_id].append(tnft)   # Fix A
+        # Perf J: update issuer index before invalidating.
+        self._tokens_by_issuer[issuer_id].add(receiver_id)
+        self._invalidate_trust_score_cache(receiver_id)
+        # Perf G: invalidate trust evidence cache for receiver — new active token.
+        # Pop all keys for this agent (any service_type variant).
+        for _k in [k for k in self._trust_evidence_cache if k[0] == receiver_id]:
+            del self._trust_evidence_cache[_k]
 
         # update cache
         target_agent = self._find_delivery_agent(receiver_id)
@@ -405,9 +487,14 @@ class BintWorldModel(mesa.Model):
         return tnft["id"]
 
     def get_vtp(
-        self, agent_id: str, service_type: str | None = None, active_only: bool = True
+        self,
+        agent_id: str,
+        service_type: str | None = None,
+        active_only: bool = True,
+        sort: bool = True,
     ) -> list[dict[str, Any]]:
-        tnfts = [t for t in self.tnft_ledger if t["owner"] == agent_id]
+        # Fix A: O(own_tokens) lookup via owner index instead of O(total_ledger) scan.
+        tnfts = list(self._ledger_by_owner.get(agent_id, []))
 
         if active_only:
             tnfts = [nft for nft in tnfts if nft["status"]]
@@ -415,7 +502,11 @@ class BintWorldModel(mesa.Model):
         if service_type is not None:
             tnfts = [nft for nft in tnfts if nft["service_type"] == service_type]
 
-        return sorted(tnfts, key=lambda tnft: tnft["timestamp"], reverse=True)
+        # Fix F: sort is skipped in hot paths (get_trust_evidence) where order
+        # does not affect the result; external callers keep sort=True by default.
+        if sort:
+            tnfts.sort(key=lambda tnft: tnft["timestamp"], reverse=True)
+        return tnfts
 
     def get_trust_evidence(
         self,
@@ -428,12 +519,16 @@ class BintWorldModel(mesa.Model):
         grouping evidence. Agents are responsible for interpreting this evidence
         into a trust score.
         """
-        active_tnfts = self.get_vtp(agent_id, service_type=None, active_only=True)
-        burned_tnfts = [
-            tnft
-            for tnft in self.get_vtp(agent_id, service_type=None, active_only=False)
-            if not tnft["status"]
-        ]
+        # Perf G: check cache first. Key is (agent_id, service_type).
+        _cache_key = (agent_id, service_type)
+        if _cache_key in self._trust_evidence_cache:
+            return self._trust_evidence_cache[_cache_key]
+
+        # Single pass over owner tokens — partitions into active and burned
+        # without calling get_vtp twice (avoids two separate list comprehensions).
+        owner_tokens = self._ledger_by_owner.get(agent_id, [])
+        active_tnfts = [t for t in owner_tokens if t["status"]]
+        burned_tnfts = [t for t in owner_tokens if not t["status"]]
 
         if service_type is None:
             context_matching_active_tnfts = active_tnfts
@@ -454,7 +549,7 @@ class BintWorldModel(mesa.Model):
                 tnft for tnft in burned_tnfts if tnft["service_type"] != service_type
             ]
 
-        return {
+        _evidence = {
             "agent_id": agent_id,
             "service_type": service_type,
             "total_active": len(active_tnfts),
@@ -470,6 +565,8 @@ class BintWorldModel(mesa.Model):
             "context_matching_burned_tnfts": context_matching_burned_tnfts,
             "other_burned_tnfts": other_burned_tnfts,
         }
+        self._trust_evidence_cache[_cache_key] = _evidence
+        return _evidence
 
     def get_available_stake_tnfts(
         self,
@@ -481,12 +578,11 @@ class BintWorldModel(mesa.Model):
         Staked TNFTs still count as active reputation, but they cannot be reused
         as collateral for another pending interaction.
         """
+        # Fix A: use owner index — same filter logic, O(own_tokens) not O(ledger).
         available_tnfts = [
             tnft
-            for tnft in self.tnft_ledger
-            if tnft["owner"] == agent_id
-            and tnft["status"]
-            and tnft.get("staked_for") is None
+            for tnft in self._ledger_by_owner.get(agent_id, [])
+            if tnft["status"] and tnft.get("staked_for") is None
         ]
 
         if service_type is None:
@@ -536,17 +632,18 @@ class BintWorldModel(mesa.Model):
             tnft["stake_role"] = role
             tnft["stake_service_type"] = service_type
 
+        # Fix B: register staked tokens so release/burn can find them in O(staked_count).
+        self._staked_by_interaction[interaction_id].extend(selected_tnfts)
+
         return [tnft["id"] for tnft in selected_tnfts]
 
     def release_interaction_stakes(self, interaction_id: str) -> None:
         """Release all active TNFTs staked for an interaction."""
-        for tnft in self.tnft_ledger:
-            if tnft.get("staked_for") != interaction_id:
+        # Fix B: use stake index — O(staked_count) instead of O(total_ledger).
+        # pop() also cleans up the index entry to prevent memory accumulation.
+        for tnft in self._staked_by_interaction.pop(interaction_id, []):
+            if not tnft["status"]:   # guard: burned between stake and release
                 continue
-
-            if not tnft["status"]:
-                continue
-
             tnft["staked_for"] = None
             tnft["stake_role"] = None
             tnft["stake_service_type"] = None
@@ -559,11 +656,9 @@ class BintWorldModel(mesa.Model):
         """Burn all active TNFTs staked for an interaction."""
         burned_count = 0
 
-        for tnft in self.tnft_ledger:
-            if tnft.get("staked_for") != interaction_id:
-                continue
-
-            if not tnft["status"]:
+        # Fix B: use stake index — O(staked_count) instead of O(total_ledger).
+        for tnft in self._staked_by_interaction.pop(interaction_id, []):
+            if not tnft["status"]:   # guard: already burned by another path
                 continue
 
             tnft["status"] = False
@@ -574,6 +669,14 @@ class BintWorldModel(mesa.Model):
             tnft["staked_for"] = None
             tnft["stake_role"] = None
             tnft["stake_service_type"] = None
+
+            # Perf J: update burned-by index and invalidate trust score cache.
+            _owner = tnft["owner"]
+            self._tokens_burned_by[burner_id].add(_owner)
+            self._invalidate_trust_score_cache(_owner)
+            # Perf G: invalidate trust evidence cache.
+            for _k in [k for k in self._trust_evidence_cache if k[0] == _owner]:
+                del self._trust_evidence_cache[_k]
 
             target_agent = self._find_delivery_agent(tnft["owner"])
             if target_agent is not None:
@@ -591,42 +694,32 @@ class BintWorldModel(mesa.Model):
         self,
         agent_id: str,
         service_type: str | None = None,
-        evaluator: DeliveryAgent | None = None,
+        evaluator: DeliveryAgent = None,
     ) -> dict[str, Any]:
-        """Return a trust summary.
+        """Return a trust summary from the perspective of evaluator.
 
-        Prefer passing an evaluator agent so the score is calculated using that
-        agent's own trust interpretation. Without an evaluator, this returns the
-        raw evidence plus a neutral fallback score for legacy callers.
+        The score is calculated using evaluator's own trust parameters
+        (weights, priors, burn multiplier). Always pass an evaluator — the
+        module-level constants that the old fallback used are not guaranteed
+        to match any specific agent's configuration, so omitting the evaluator
+        produces scores that are inconsistent with live agent decisions.
         """
+        if evaluator is None:
+            raise TypeError(
+                "get_vtp_summary() requires an evaluator agent. "
+                "Pass the agent whose trust perspective should be used."
+            )
+
         evidence = self.get_trust_evidence(agent_id, service_type)
-
-        if evaluator is not None:
-            return evaluator.calculate_trust_summary_from_evidence(evidence)
-
-        # Legacy fallback: keeps old notebooks/helpers from breaking.
-        # Agent decisions should not rely on this fallback.
-        weighted_active = (
-            CONTEXT_MATCH_WEIGHT * evidence["context_matching_active"]
-            + OTHER_CONTEXT_WEIGHT * evidence["other_active"]
-        )
-        weighted_burned = (
-            CONTEXT_MATCH_WEIGHT * evidence["context_matching_burned"]
-            + OTHER_CONTEXT_WEIGHT * evidence["other_burned"]
-        )
-        score = self._calculate_trust_score(
-            weighted_active=weighted_active,
-            weighted_burned=weighted_burned,
-        )
-
-        return {
-            **evidence,
-            "weighted_active": weighted_active,
-            "weighted_burned": weighted_burned,
-            "score": score,
-        }
+        return evaluator.calculate_trust_summary_from_evidence(evidence)
 
     def get_reviewer_summary(self, reviewer_id: str) -> dict[str, Any]:
+        # Perf D: return cached result when available.
+        # Cache is invalidated in record_outcome whenever a new outcome is
+        # recorded for an interaction where this agent was the truster (reviewer).
+        if reviewer_id in self._reviewer_cache:
+            return self._reviewer_cache[reviewer_id]
+
         total_reviews = 0
         positive_reviews = 0
         negative_reviews = 0
@@ -654,7 +747,7 @@ class BintWorldModel(mesa.Model):
             negative_reviews / total_reviews if total_reviews > 0 else 0.0
         )
 
-        return {
+        result = {
             "reviewer_id": reviewer_id,
             "total_reviews": total_reviews,
             "positive_reviews": positive_reviews,
@@ -662,33 +755,8 @@ class BintWorldModel(mesa.Model):
             "disputed_reviews": disputed_reviews,
             "negative_review_rate": negative_review_rate,
         }
-
-    @staticmethod
-    def _tnft_weight(tnft: dict[str, Any]) -> float:
-        """Return the reputation weight of a TNFT.
-
-        This currently returns 1.0 for every token. Keeping it as a helper makes
-        it easy to add time decay later without changing the trust-score logic.
-        """
-        return 1.0
-
-    def _calculate_weighted_tnfts(
-        self,
-        context_matching_tnfts: list[dict[str, Any]],
-        other_tnfts: list[dict[str, Any]],
-    ) -> float:
-        context_weight = sum(self._tnft_weight(tnft) for tnft in context_matching_tnfts)
-        other_weight = sum(self._tnft_weight(tnft) for tnft in other_tnfts)
-
-        return (
-            CONTEXT_MATCH_WEIGHT * context_weight + OTHER_CONTEXT_WEIGHT * other_weight
-        )
-
-    @staticmethod
-    def _calculate_trust_score(weighted_active: float, weighted_burned: float) -> float:
-        return (TRUST_PRIOR_ACTIVE + weighted_active) / (
-            TRUST_PRIOR_ACTIVE + TRUST_PRIOR_BURNED + weighted_active + weighted_burned
-        )
+        self._reviewer_cache[reviewer_id] = result
+        return result
 
     def query_vtp(self, agent_id: str) -> int:
         """Return the legacy active-token count used by older callers.
@@ -700,10 +768,11 @@ class BintWorldModel(mesa.Model):
     def burn_tnft(
         self, burner_id: str, target_id: str, service_type: str | None = None
     ) -> bool:
+        # Fix A: use owner index — same filter, O(own_tokens) not O(total_ledger).
         active_tnfts = [
             tnft
-            for tnft in self.tnft_ledger
-            if tnft["owner"] == target_id and tnft["status"]
+            for tnft in self._ledger_by_owner.get(target_id, [])
+            if tnft["status"]
         ]
 
         if service_type is not None:
@@ -727,6 +796,13 @@ class BintWorldModel(mesa.Model):
         tnft_to_burn["burned_by"] = burner_id
         tnft_to_burn["burn_timestamp"] = self.time
 
+        # Perf J: update burned-by index and invalidate trust score cache.
+        self._tokens_burned_by[burner_id].add(target_id)
+        self._invalidate_trust_score_cache(target_id)
+        # Perf G: invalidate trust evidence cache for burned agent.
+        for _k in [k for k in self._trust_evidence_cache if k[0] == target_id]:
+            del self._trust_evidence_cache[_k]
+
         target_agent = self._find_delivery_agent(target_id)
         if target_agent is not None:
             target_agent.cached_active_tnfts = max(
@@ -736,28 +812,46 @@ class BintWorldModel(mesa.Model):
 
         return True
 
-    def _find_delivery_agent(self, agent_id: str) -> DeliveryAgent | None:
-        return next(
-            (
-                agent
-                for agent in self.cached_delivery_agents
-                if agent.unique_id == agent_id
-            ),
-            None,
+    def _invalidate_trust_score_cache(self, changed_agent_id: str) -> None:
+        """Remove trust score cache entries affected by a TNFT state change.
+
+        Three sets of entries are removed:
+          (a) Any score OF changed_agent_id  (direct: their token count changed).
+          (b) filter=True scores where target has tokens ISSUED BY changed_agent_id
+              (issuer trust re-evaluated in _filter_untrusted_trust_evidence).
+          (c) filter=True scores where target had a token BURNED BY changed_agent_id
+              (burned evidence filtered by burned_by identity).
+        filter=False entries for targets ≠ changed_agent_id are guaranteed correct
+        (they only depend on the target's own token counts, which did not change).
+        """
+        if not self._trust_score_cache:
+            return
+
+        # Targets whose filtered score may have changed via issuer/burner effects
+        indirect: set = (
+            self._tokens_by_issuer.get(changed_agent_id, frozenset())
+            | self._tokens_burned_by.get(changed_agent_id, frozenset())
         )
+
+        to_remove = [
+            k for k in self._trust_score_cache
+            if (
+                k[1] == changed_agent_id          # (a) direct
+                or (k[3] and k[1] in indirect)    # (b)/(c) indirect, filter=True only
+            )
+        ]
+        for k in to_remove:
+            del self._trust_score_cache[k]
+
+    def _find_delivery_agent(self, agent_id: str) -> DeliveryAgent | None:
+        # Perf E: O(1) dict lookup — index built in _cache_agents.
+        return self._agent_index.get(agent_id)
 
     def get_drop_off_coordinate(self, drop_off_name: str | None) -> Coordinate | None:
         if drop_off_name is None:
             return None
-
-        drop_off = next(
-            (
-                agent
-                for agent in self.cached_drop_offs
-                if agent.unique_id == drop_off_name
-            ),
-            None,
-        )
+        # Perf H: O(1) dict lookup — index built in _cache_agents.
+        drop_off = self._dropoff_index.get(drop_off_name)
         return drop_off.cell.coordinate if drop_off is not None else None
 
     def request_map_data(
@@ -814,8 +908,8 @@ class BintWorldModel(mesa.Model):
             receiving_agent = delivery_agents[i % len(delivery_agents)]
             receiving_agent.update_internal_map(
                 coordinate=drop_off.cell.coordinate,
-                env_type="drop_off",
-                info_source="system",
+                env_type=ENV_DROP_OFF,
+                info_source=SOURCE_SYSTEM,
                 drop_off_name=drop_off.unique_id,
             )
 
@@ -827,9 +921,13 @@ class BintWorldModel(mesa.Model):
         if not self.cached_delivery_agents or not self.cached_drop_offs:
             return
 
-        # get the names of each drop off location
+        # Perf I: build the without-packages list once and short-circuit if
+        # all agents are busy — avoids the O(n) comprehension when not needed.
+        _idle_agents = self._agents_without_packages()
+        if not _idle_agents:
+            return
 
-        for agent in self._agents_without_packages():
+        for agent in _idle_agents:
             possible_destinations = [
                 d for d in self.cached_drop_offs if d.unique_id != agent.prev_goal_name
             ]
