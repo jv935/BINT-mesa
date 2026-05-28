@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Results and data (mounted as a volume at runtime instead)
+results/
+
+# Git
+.git/
+.gitignore
+
+# Docs / misc
+docs/
+*.md
+LICENSE
+CITATION.cff

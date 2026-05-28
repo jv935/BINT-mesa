@@ -1,0 +1,28 @@
+services:
+
+  # Run: docker compose up dashboard
+  # Then open http://localhost:8765
+  dashboard:
+    build: .
+    command: solara run app.py --host 0.0.0.0 --port 8765
+    ports:
+      - "8765:8765"
+    volumes:
+      # Mount results so outputs persist after the container stops
+      - ./results:/app/results
+
+  # Run: docker compose up notebooks
+  # Then open the URL printed in the terminal (includes the login token)
+  notebooks:
+    build: .
+    command: >
+      jupyter lab
+        --ip=0.0.0.0
+        --port=8888
+        --no-browser
+        --NotebookApp.token=''
+        --NotebookApp.password=''
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./results:/app/results
