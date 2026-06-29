@@ -278,11 +278,13 @@ class DeliveryAgent(CellAgent):
     ) -> dict[str, Any]:
         """This agent's trust summary for another agent.
 
-        The model supplies raw ledger evidence; this agent decides how to filter,
-        weight, and score it. Results are memoised on the model's trust-score
-        cache, keyed by (evaluator, target, service_type, filter_flag), and
-        invalidated there whenever a relevant token state changes.
+        In the default BINT mode the score is computed from TNFT/VTP evidence.
+        In BRS mode it is computed from classical beta reputation counts
+        (successes/failures) kept by the model.
         """
+        if getattr(self.model, "trust_model", "bint") == "brs":
+            return self.calculate_brs_trust_summary(target_id, service_type)
+
         use_filter = (
             self.filter_untrusted_evidence
             if filter_untrusted_evidence is None
@@ -304,6 +306,85 @@ class DeliveryAgent(CellAgent):
 
         if score_cache is not None:
             score_cache[(self.unique_id, target_id, service_type, use_filter)] = result
+
+        return result
+
+    def calculate_brs_trust_summary(
+        self,
+        target_id: str,
+        service_type: str | None = MAP_DATA_SERVICE,
+    ) -> dict[str, Any]:
+        """Classical Beta Reputation System trust summary.
+
+        The expected reputation is alpha / (alpha + beta), where alpha is the
+        success prior plus observed successes and beta is the failure prior plus
+        observed failures. The extra alias fields keep the dashboard and metric
+        code compatible with the existing BINT summary shape.
+        """
+        cache = getattr(self.model, "_brs_score_cache", None)
+        prior_success = float(
+            getattr(self.model, "brs_prior_success", self.trust_prior_active)
+        )
+        prior_failure = float(
+            getattr(self.model, "brs_prior_failure", self.trust_prior_burned)
+        )
+
+        cache_key = (
+            self.unique_id,
+            target_id,
+            service_type,
+            prior_success,
+            prior_failure,
+        )
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+
+        evidence = self.model.get_brs_evidence(target_id, service_type)
+        successes = float(evidence["successes"])
+        failures = float(evidence["failures"])
+
+        alpha = prior_success + successes
+        beta = prior_failure + failures
+        score = alpha / (alpha + beta)
+
+        result = {
+            **evidence,
+            "score": score,
+            "alpha": alpha,
+            "beta": beta,
+            "successes": successes,
+            "failures": failures,
+            "brs_successes": successes,
+            "brs_failures": failures,
+            "filter_untrusted_evidence": False,
+            "filtered_out_active": 0,
+            "filtered_out_burned": 0,
+            "total_active": successes,
+            "context_matching_active": successes,
+            "other_active": 0.0,
+            "total_burned": failures,
+            "context_matching_burned": failures,
+            "other_burned": 0.0,
+            "active_tnfts": [],
+            "burned_tnfts": [],
+            "context_matching_active_tnfts": [],
+            "other_active_tnfts": [],
+            "context_matching_burned_tnfts": [],
+            "other_burned_tnfts": [],
+            "unfiltered_total_active": successes,
+            "unfiltered_total_burned": failures,
+            "weighted_active": successes,
+            "weighted_burned": failures,
+            "trust_calculator": "BetaReputationSystem",
+            "context_match_weight": 1.0,
+            "other_context_weight": 0.0,
+            "trust_prior_active": prior_success,
+            "trust_prior_burned": prior_failure,
+            "burned_weight_multiplier": 1.0,
+        }
+
+        if cache is not None:
+            cache[cache_key] = result
 
         return result
 

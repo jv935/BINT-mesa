@@ -18,6 +18,7 @@ from agents import (
 Coordinate = tuple[int, int]
 InteractionStatus = Literal["pending", "completed", "cancelled"]
 OutcomeStatus = Literal["success", "failure", "disputed"]
+TrustModelName = Literal["bint", "brs"]
 
 MAP_DATA_SERVICE = "map_data"
 SYSTEM_ISSUER_ID = "SYSTEM"
@@ -110,9 +111,30 @@ class BintWorldModel(mesa.Model):
         max_steps: int = 1500,
         staking_enabled: bool = True,
         rng: int | str | None = None,
+        trust_model: TrustModelName | str = "bint",
+        reputation_model: TrustModelName | str | None = None,
+        brs_prior_success: float = 1.0,
+        brs_prior_failure: float = 1.0,
+        brs_forgetting_factor: float = 1.0,
     ) -> None:
         self.rng_seed = self._normalise_rng_seed(rng)
         super().__init__(rng=self.rng_seed)
+
+        self.trust_model = self._normalise_trust_model(
+            reputation_model if reputation_model is not None else trust_model
+        )
+        self.brs_prior_success = float(brs_prior_success)
+        self.brs_prior_failure = float(brs_prior_failure)
+        self.brs_forgetting_factor = float(brs_forgetting_factor)
+
+        if self.brs_prior_success <= 0:
+            raise ValueError("brs_prior_success must be > 0.")
+
+        if self.brs_prior_failure <= 0:
+            raise ValueError("brs_prior_failure must be > 0.")
+
+        if not 0.0 < self.brs_forgetting_factor <= 1.0:
+            raise ValueError("brs_forgetting_factor must be in (0, 1].")
 
         self.size = size if size is not None else (width, height)
         self.width, self.height = self.size
@@ -120,7 +142,10 @@ class BintWorldModel(mesa.Model):
 
         self.num_drop_offs = int(num_drop_offs)
         self.genesis_tokens = int(genesis_tokens)
-        self.staking_enabled = bool(staking_enabled)
+        # Staking is a BINT/TNFT mechanism. Classical BRS has no token collateral,
+        # so keep BRS runs clean by disabling staking even if an old caller passes
+        # staking_enabled=True.
+        self.staking_enabled = bool(staking_enabled) and self.trust_model == "bint"
 
         if agent_profiles is None:
             self.agent_profiles = [
@@ -148,6 +173,24 @@ class BintWorldModel(mesa.Model):
         if rng is None or rng == "":
             return None
         return int(rng)
+
+    @staticmethod
+    def _normalise_trust_model(trust_model: TrustModelName | str) -> TrustModelName:
+        value = str(trust_model).strip().lower()
+        aliases = {
+            "bint": "bint",
+            "tnft": "bint",
+            "vtp": "bint",
+            "brs": "brs",
+            "beta": "brs",
+            "beta_reputation": "brs",
+            "beta_reputation_system": "brs",
+        }
+        normalised = aliases.get(value)
+        if normalised is None:
+            valid = ", ".join(sorted(set(aliases.values())))
+            raise ValueError(f"Unknown trust_model '{trust_model}'. Valid models: {valid}.")
+        return normalised  # type: ignore[return-value]
 
     def _create_grid(self) -> None:
         """Build the grid and reserve distinct cells for drop-offs and agents."""
@@ -190,6 +233,14 @@ class BintWorldModel(mesa.Model):
         self.interactions: dict[str, InteractionRecord] = {}
         self.outcomes: dict[str, OutcomeRecord] = {}
         self.decision_events: list[dict[str, Any]] = []
+
+        # Classical Beta Reputation System evidence. It is intentionally kept
+        # separate from the BINT/TNFT ledger: successes and failures are counted
+        # per trustee and service context from settled interaction outcomes.
+        self._brs_evidence: defaultdict[str, defaultdict[str, dict[str, float]]] = (
+            defaultdict(lambda: defaultdict(lambda: {"successes": 0.0, "failures": 0.0}))
+        )
+        self._brs_score_cache: dict[tuple, dict[str, Any]] = {}
 
         # ledger_by_owner shares the same dict objects as tnft_ledger, so in-place
         # mutations (burn/stake/release) are reflected automatically; only mint
@@ -392,6 +443,12 @@ class BintWorldModel(mesa.Model):
         interaction_record = self.interactions.get(interaction_id)
         if interaction_record is not None:
             self._reviewer_cache.pop(interaction_record.truster_id, None)
+            if self.trust_model == "brs" and status in {"success", "failure"}:
+                self.record_brs_outcome(
+                    target_id=interaction_record.trustee_id,
+                    service_type=interaction_record.service_type,
+                    status=status,
+                )
 
         return outcome
 
@@ -429,7 +486,8 @@ class BintWorldModel(mesa.Model):
         """Release/burn stake and mint reward according to the outcome status."""
         if outcome.status == "success":
             self.release_interaction_stakes(interaction.interaction_id)
-            self._reward_successful_interaction(interaction, outcome, evaluator_id)
+            if self.trust_model == "bint":
+                self._reward_successful_interaction(interaction, outcome, evaluator_id)
             interaction.status = "completed"
             return
 
@@ -442,6 +500,12 @@ class BintWorldModel(mesa.Model):
                     interaction_id=interaction.interaction_id,
                     burner_id=evaluator_id,
                 )
+                interaction.status = "completed"
+                return
+
+            if self.trust_model == "brs":
+                # BRS state was already updated in record_outcome(); no TNFT burn
+                # is performed because BRS has no token economy.
                 interaction.status = "completed"
                 return
 
@@ -475,6 +539,9 @@ class BintWorldModel(mesa.Model):
     # ----- TNFT ledger: minting and burning ------------------------------- #
     def seed_genesis_tnfts(self) -> None:
         """Give each delivery agent its initial bootstrap tokens from SYSTEM."""
+        if self.trust_model != "bint":
+            return
+
         for agent in self.cached_delivery_agents:
             for _ in range(self.genesis_tokens):
                 self.mint_tnft(
@@ -725,6 +792,81 @@ class BintWorldModel(mesa.Model):
 
         return burned_count
 
+    # ----- Beta Reputation System ----------------------------------------- #
+    def record_brs_outcome(
+        self,
+        target_id: str,
+        service_type: str,
+        status: OutcomeStatus,
+    ) -> None:
+        """Update the classical Beta Reputation System evidence for a trustee.
+
+        BRS is count-based: successful outcomes increment alpha-like positive
+        evidence and failed outcomes increment beta-like negative evidence. A
+        forgetting factor can be used to decay older evidence before the new
+        observation is added. The simulation uses reported outcomes, matching the
+        ledger semantics used by BINT, so dishonest reviews can affect BRS too.
+        """
+        if status not in {"success", "failure"}:
+            return
+
+        evidence = self._brs_evidence[target_id][service_type]
+        evidence["successes"] *= self.brs_forgetting_factor
+        evidence["failures"] *= self.brs_forgetting_factor
+
+        if status == "success":
+            evidence["successes"] += 1.0
+        elif status == "failure":
+            evidence["failures"] += 1.0
+
+        self._invalidate_brs_cache(target_id)
+
+    def _invalidate_brs_cache(self, changed_agent_id: str) -> None:
+        if not self._brs_score_cache:
+            return
+
+        stale_keys = [key for key in self._brs_score_cache if key[1] == changed_agent_id]
+        for key in stale_keys:
+            del self._brs_score_cache[key]
+
+    def get_brs_evidence(
+        self,
+        agent_id: str,
+        service_type: str | None = MAP_DATA_SERVICE,
+    ) -> dict[str, Any]:
+        """Return Beta Reputation System evidence for an agent.
+
+        If ``service_type`` is None, evidence is aggregated over all services.
+        Otherwise only the requested service context is used.
+        """
+        if service_type is None:
+            successes = sum(
+                evidence["successes"]
+                for evidence in self._brs_evidence.get(agent_id, {}).values()
+            )
+            failures = sum(
+                evidence["failures"]
+                for evidence in self._brs_evidence.get(agent_id, {}).values()
+            )
+        else:
+            evidence = self._brs_evidence.get(agent_id, {}).get(
+                service_type, {"successes": 0.0, "failures": 0.0}
+            )
+            successes = evidence["successes"]
+            failures = evidence["failures"]
+
+        return {
+            "agent_id": agent_id,
+            "service_type": service_type,
+            "successes": successes,
+            "failures": failures,
+            "brs_successes": successes,
+            "brs_failures": failures,
+            "brs_prior_success": self.brs_prior_success,
+            "brs_prior_failure": self.brs_prior_failure,
+            "brs_forgetting_factor": self.brs_forgetting_factor,
+        }
+
     # ----- Trust evidence and queries ------------------------------------- #
     def get_vtp(
         self,
@@ -822,6 +964,9 @@ class BintWorldModel(mesa.Model):
                 "get_vtp_summary() requires an evaluator agent. "
                 "Pass the agent whose trust perspective should be used."
             )
+
+        if self.trust_model == "brs":
+            return evaluator.calculate_trust_summary(agent_id, service_type)
 
         evidence = self.get_trust_evidence(agent_id, service_type)
         return evaluator.calculate_trust_summary_from_evidence(evidence)
